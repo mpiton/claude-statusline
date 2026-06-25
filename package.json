@@ -5,6 +5,9 @@
   "bin": {
     "claude-statusline": "./bin/install.js"
   },
+  "scripts": {
+    "test": "bash test/statusline.test.sh"
+  },
   "keywords": [
     "claude",
     "claude-code",
