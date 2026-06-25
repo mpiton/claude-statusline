@@ -13,6 +13,8 @@ tmp_home=$(mktemp -d)
 cleanup() {
     if command -v trash >/dev/null 2>&1; then
         trash "$tmp_home" >/dev/null 2>&1 || true
+    else
+        rm -R "$tmp_home" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT
