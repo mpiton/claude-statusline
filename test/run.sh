@@ -24,6 +24,7 @@ export GIT_CEILING_DIRECTORIES="$TMP"
 
 green='\033[32m'; red='\033[31m'; yellow='\033[33m'; dim='\033[2m'; reset='\033[0m'
 passed=0; failed=0; skipped=0
+export STATUSLINE_TEST_POLL_ATTEMPTS=600 STATUSLINE_TEST_POLL_DELAY=0.05
 
 # ── Sandbox ─────────────────────────────────────────────
 
@@ -34,9 +35,9 @@ cat > "$TMP/bin/curl" <<'EOF'
 #!/bin/bash
 if [ -n "${STUB_CURL_GATE:-}" ]; then
     [ -n "${STUB_CURL_WAITING:-}" ] && : > "$STUB_CURL_WAITING"
-    for _ in {1..600}; do
+    for ((i=0; i<STATUSLINE_TEST_POLL_ATTEMPTS; i++)); do
         [ -f "$STUB_CURL_GATE" ] && break
-        sleep 0.05
+        sleep "$STATUSLINE_TEST_POLL_DELAY"
     done
     if [ ! -f "$STUB_CURL_GATE" ]; then
         [ -n "${STUB_CURL_TIMED_OUT:-}" ] && : > "$STUB_CURL_TIMED_OUT"
@@ -211,10 +212,10 @@ section() { [ -n "$FILTER" ] || printf "\n${dim}%s${reset}\n" "$1"; }
 seed_cache() { printf '%s' "$1" > "$CACHE_FILE"; }
 clear_cache() { rm -f "$CACHE_FILE"; }
 wait_for_file() {
-    local path=$1
-    for _ in {1..600}; do
+    local path=$1 i
+    for ((i=0; i<STATUSLINE_TEST_POLL_ATTEMPTS; i++)); do
         [ -f "$path" ] && return 0
-        sleep 0.05
+        sleep "$STATUSLINE_TEST_POLL_DELAY"
     done
     return 1
 }
