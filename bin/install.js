@@ -32,29 +32,40 @@ function fail(msg) {
   console.error(`  ${red}✗${reset} ${msg}`);
 }
 
+const DEPS = ["jq", "curl", "git"];
+
+// curl and git come with the OS or with Git for Windows; jq is the one people
+// have to go and get, so the failure message says how.
+const JQ_INSTALL =
+  {
+    darwin: "brew install jq",
+    win32: "winget install jqlang.jq",
+  }[process.platform] || "sudo apt install jq, or whatever your distro uses";
+
+// Ask bash what it can see, since bash is what runs the statusline at render
+// time. The probe used to be `which jq`, which execSync hands to cmd.exe on
+// Windows — there is no `which` there, so all three looked missing and the
+// install stopped before it started.
 function checkDeps() {
-  const { execSync } = require("child_process");
-  const missing = [];
+  const { execFileSync } = require("child_process");
+  const probe = DEPS.map((dep) => `command -v ${dep} >/dev/null || echo ${dep}`).join("\n");
 
+  let found;
   try {
-    execSync("which jq", { stdio: "ignore" });
+    found = execFileSync("bash", ["-c", probe], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
   } catch {
-    missing.push("jq");
+    // No bash on PATH, so nothing here would run anyway — settings.json points
+    // Claude Code at `bash "$HOME/.claude/statusline.sh"`.
+    return ["bash"];
   }
 
-  try {
-    execSync("which curl", { stdio: "ignore" });
-  } catch {
-    missing.push("curl");
-  }
-
-  try {
-    execSync("which git", { stdio: "ignore" });
-  } catch {
-    missing.push("git");
-  }
-
-  return missing;
+  return found
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
 }
 
 function uninstall() {
@@ -112,12 +123,15 @@ function run() {
   if (missing.length > 0) {
     fail(`Missing required dependencies: ${missing.join(", ")}`);
     log(`  Install them and try again.`);
+    if (missing.includes("bash")) {
+      log(`  ${dim}Claude Code runs the statusline through bash${reset}`);
+    }
     if (missing.includes("jq")) {
-      log(`  ${dim}brew install jq${reset}`);
+      log(`  ${dim}${JQ_INSTALL}${reset}`);
     }
     process.exit(1);
   }
-  success("Dependencies found (jq, curl, git)");
+  success(`Dependencies found (${DEPS.join(", ")})`);
 
   if (!fs.existsSync(CLAUDE_DIR)) {
     fs.mkdirSync(CLAUDE_DIR, { recursive: true });

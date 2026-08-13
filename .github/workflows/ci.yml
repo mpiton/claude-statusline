@@ -63,9 +63,9 @@ jobs:
           node --check bin/install.js
           bash test/install.sh
 
-  # Git Bash is a third date/stat/ps dialect. Only test/run.sh runs here —
-  # install.js probes its dependencies with `which`, which execSync hands to
-  # cmd.exe on Windows, so the installer cannot work there yet.
+  # Git Bash is a third date/stat/ps dialect, and the installer has its own
+  # Windows story: node reads USERPROFILE instead of HOME, and the dependency
+  # probe has to reach the same tools bash will at render time.
   test-windows:
     name: test (windows)
     runs-on: windows-latest
@@ -79,8 +79,20 @@ jobs:
           # scripts are repo-controlled, so don't leave a token in .git/config
           # for them to read.
           persist-credentials: false
-      - run: bash --version | head -1
-      - run: bash test/run.sh
+
+      - name: Show environment
+        run: |
+          bash --version | head -1
+          jq --version || true
+          node --version
+
+      - name: Statusline tests
+        run: bash test/run.sh
+
+      - name: Installer tests
+        run: |
+          node --check bin/install.js
+          bash test/install.sh
 
   package:
     name: package

@@ -28,6 +28,13 @@ On macOS:
 brew install jq
 ```
 
+On Windows the statusline runs under the bash that Git for Windows ships, which
+brings curl and git with it. jq you install yourself:
+
+```bash
+winget install jqlang.jq
+```
+
 ## Cache
 
 Rate limit responses and the git dirty flag are cached in
@@ -49,7 +56,7 @@ bash test/run.sh effort    # only cases whose name contains "effort"
 
 `test/install.sh` runs `bin/install.js` against a throwaway `HOME` and checks the install, the uninstall and the backup round-trip.
 
-Both take a filter argument. CI runs shellcheck, then the suite on Linux, macOS and Windows/Git Bash. The installer tests are Linux and macOS only — `bin/install.js` probes for `jq`/`curl`/`git` with `which`, which does not resolve under `cmd.exe`.
+Both take a filter argument. CI runs shellcheck, then the full suite on Linux, macOS and Windows/Git Bash.
 
 ## Uninstall
 
