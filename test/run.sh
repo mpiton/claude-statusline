@@ -344,8 +344,10 @@ render "$(payload '.cost = {
     total_lines_added: 0,
     total_lines_removed: 0
 } | .output_style.name = "default"')"
-assert_line1_re "zero cost and the default output style still render" \
-    'repo-clean \(main\) │ \$0\.00 │ style:default$'
+assert "zero cost and the default output style still render" \
+    "Opus 5 │ ✍️ 25% │ repo-clean (main) │ \$0.00 │ style:default
+
+$RATES"
 
 section "effort"
 
