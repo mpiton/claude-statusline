@@ -227,7 +227,12 @@ if [ -n "$git_branch" ]; then
     now_s=${EPOCHSECONDS:-}
     dirty_hit=""
     if [ -n "$now_s" ] && [ -f "$dirty_cache" ]; then
+        # The entry is written without a trailing newline, so `read` reports EOF
+        # and returns non-zero even though it filled the fields.
         IFS=$'\x1f' read -r cached_expiry cached_dirty cached_cwd < "$dirty_cache"
+        # Keyed on the directory: a stale entry from another cwd is a miss, not a
+        # wrong star. A path the caller spells differently misses too, which
+        # costs one worktree walk and stays correct.
         if [ "$cached_cwd" = "$cwd" ] && is_num "$cached_expiry" && [ "$now_s" -lt "$cached_expiry" ]; then
             dirty_hit=yes
             git_dirty=$cached_dirty
@@ -238,7 +243,7 @@ if [ -n "$git_branch" ]; then
             git_dirty="*"
         fi
         if [ -n "$now_s" ]; then
-            printf '%s\x1f%s\x1f%s\n' "$(( now_s + 2 ))" "$git_dirty" "$cwd" \
+            printf '%s\x1f%s\x1f%s' "$(( now_s + 2 ))" "$git_dirty" "$cwd" \
                 > "$dirty_cache" 2>/dev/null
         fi
     fi

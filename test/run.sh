@@ -204,37 +204,70 @@ assert "dirty worktree gets a star" "Opus 5 │ ✍️ 25% │ repo-dirty (main*
 
 $RATES"
 
-# The dirty flag is cached to skip a worktree walk per render. The entry is
-# seeded rather than inherited from the case above: leaving it to residue would
-# let these pass on a slow runner, where the real entry has expired before the
-# render that is supposed to reject it. The expiry is far enough out that no
-# case has to reason about the clock.
-DIRTY_CACHE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-dirty-cache"
-seed_dirty() { printf '%s\x1f%s\x1f%s\n' 9999999999 "$1" "$2" > "$DIRTY_CACHE"; }
-
-seed_dirty '*' "$REPO_DIRTY"
-render "$(payload)"
-assert "a cached dirty flag does not leak into another directory" "Opus 5 │ ✍️ 25% │ repo-clean (main)
-
-$RATES"
-
-seed_dirty '' "$REPO_CLEAN"
-render "$(payload '.cwd = "'"$REPO_DIRTY"'"')"
-assert "nor does a cached clean flag" "Opus 5 │ ✍️ 25% │ repo-dirty (main*)
-
-$RATES"
-
-# The other half: a cache nothing reads would pass both cases above. A clean
-# worktree printing a star can only come from the cached entry.
+# The dirty flag is cached to skip a worktree walk per render. Each case seeds
+# the entry rather than inheriting one from the case above: leaving it to
+# residue would let these pass on a slow runner, where the real entry has
+# expired before the render that is supposed to reject it. The expiry is far
+# enough out that no case has to reason about the clock.
+LEAK="a cached dirty flag does not leak into another directory"
+LEAK2="nor does a cached clean flag"
 CACHED="a cached flag is reused within its own directory"
-if [ -z "${EPOCHSECONDS:-}" ]; then
-    skip "$CACHED" "no \$EPOCHSECONDS before bash 5"
+DIRTY_CACHE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-dirty-cache"
+rm -f "$DIRTY_CACHE"
+render "$(payload)"
+
+if [ ! -f "$DIRTY_CACHE" ]; then
+    # No $EPOCHSECONDS means no clock to expire an entry on, so the script
+    # never writes one and the whole feature is off. Nothing to seed against.
+    for name in "$LEAK" "$LEAK2" "$CACHED"; do
+        skip "$name" "no dirty-flag cache before bash 5"
+    done
 else
-    seed_dirty '*' "$REPO_CLEAN"
+    # Seed against the directory as the script spelled it, read back from the
+    # entry it just wrote. Under Git Bash the cwd it receives comes back
+    # MSYS-rewritten (`C:/Users/RUNNER~1/...`) whichever way the payload
+    # carries it, so a path spelled by hand here would key the entry on a
+    # directory the lookup never asks about, and every case would read as a
+    # miss.
+    IFS=$'\x1f' read -r _ _ SEEN_CWD < "$DIRTY_CACHE"
+    seed_dirty() { printf '%s\x1f%s\x1f%s' 9999999999 "$1" "$2" > "$DIRTY_CACHE"; }
+
+    seed_dirty '*' "$SEEN_CWD/elsewhere"
+    render "$(payload)"
+    assert "$LEAK" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
+    seed_dirty '' "$SEEN_CWD"
+    render "$(payload '.cwd = "'"$REPO_DIRTY"'"')"
+    assert "$LEAK2" "Opus 5 │ ✍️ 25% │ repo-dirty (main*)
+
+$RATES"
+
+    # The other half: a cache nothing reads would pass both cases above. A
+    # clean worktree printing a star can only come from the cached entry.
+    seed_dirty '*' "$SEEN_CWD"
     render "$(payload)"
     assert "$CACHED" "Opus 5 │ ✍️ 25% │ repo-clean (main*)
 
 $RATES"
+
+    # An entry past its expiry is a miss. Seeding one dead on arrival tests the
+    # clock without a case having to wait out the real two-second window.
+    printf '%s\x1f%s\x1f%s' 1 '*' "$SEEN_CWD" > "$DIRTY_CACHE"
+    render "$(payload)"
+    assert "an expired entry is ignored" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
+    # A half-written entry is a miss too, and the expiry compare must not warn
+    # about the garbage it was handed.
+    printf '%s\x1f%s\x1f%s' 'nope' '*' "$SEEN_CWD" > "$DIRTY_CACHE"
+    render "$(payload)"
+    assert "a corrupt entry is ignored" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+    assert_no_stderr "a corrupt entry does not warn"
 fi
 rm -f "$DIRTY_CACHE"
 
