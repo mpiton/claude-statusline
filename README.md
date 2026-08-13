@@ -40,7 +40,7 @@ bash test/run.sh effort    # only cases whose name contains "effort"
 
 `test/install.sh` runs `bin/install.js` against a throwaway `HOME` and checks the install, the uninstall and the backup round-trip.
 
-Both take a filter argument. CI runs them on Linux and macOS, plus shellcheck; Windows/Git Bash runs too but is informational for now.
+Both take a filter argument. CI runs shellcheck, then the suite on Linux, macOS and Windows/Git Bash. The installer tests are Linux and macOS only — `bin/install.js` probes for `jq`/`curl`/`git` with `which`, which does not resolve under `cmd.exe`.
 
 ## Uninstall
 

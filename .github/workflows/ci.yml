@@ -53,12 +53,12 @@ jobs:
           node --check bin/install.js
           bash test/install.sh
 
-  # Git Bash is a third date/stat/ps dialect and nothing has ever been run
-  # there. Informational until the gaps it reports are fixed.
+  # Git Bash is a third date/stat/ps dialect. Only test/run.sh runs here —
+  # install.js probes its dependencies with `which`, which execSync hands to
+  # cmd.exe on Windows, so the installer cannot work there yet.
   test-windows:
-    name: test (windows, informational)
+    name: test (windows)
     runs-on: windows-latest
-    continue-on-error: true
     defaults:
       run:
         shell: bash
