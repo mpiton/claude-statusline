@@ -24,6 +24,7 @@ export GIT_CEILING_DIRECTORIES="$TMP"
 
 green='\033[32m'; red='\033[31m'; yellow='\033[33m'; dim='\033[2m'; reset='\033[0m'
 passed=0; failed=0; skipped=0
+export STATUSLINE_TEST_POLL_ATTEMPTS=600 STATUSLINE_TEST_POLL_DELAY=0.05
 
 # ── Sandbox ─────────────────────────────────────────────
 
@@ -32,6 +33,17 @@ passed=0; failed=0; skipped=0
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/bin/bash
+if [ -n "${STUB_CURL_GATE:-}" ]; then
+    [ -n "${STUB_CURL_WAITING:-}" ] && : > "$STUB_CURL_WAITING"
+    for ((i=0; i<STATUSLINE_TEST_POLL_ATTEMPTS; i++)); do
+        [ -f "$STUB_CURL_GATE" ] && break
+        sleep "$STATUSLINE_TEST_POLL_DELAY"
+    done
+    if [ ! -f "$STUB_CURL_GATE" ]; then
+        [ -n "${STUB_CURL_TIMED_OUT:-}" ] && : > "$STUB_CURL_TIMED_OUT"
+        exit 7
+    fi
+fi
 if [ -n "${STUB_CURL_BODY:-}" ] && [ -f "$STUB_CURL_BODY" ]; then
     cat "$STUB_CURL_BODY"
     exit 0
@@ -49,7 +61,7 @@ mkdir -p "$HOME/.claude"
 echo '{}' > "$HOME/.claude/settings.json"
 
 export CLAUDE_STATUSLINE_CACHE_DIR="$TMP/cache"
-mkdir -p "$CLAUDE_STATUSLINE_CACHE_DIR"
+mkdir -m 700 "$CLAUDE_STATUSLINE_CACHE_DIR"
 CACHE_FILE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-usage-cache.json"
 
 REPO_CLEAN="$TMP/repo-clean"
@@ -199,6 +211,14 @@ section() { [ -n "$FILTER" ] || printf "\n${dim}%s${reset}\n" "$1"; }
 # Renders share one cache; seed or clear it explicitly per case.
 seed_cache() { printf '%s' "$1" > "$CACHE_FILE"; }
 clear_cache() { rm -f "$CACHE_FILE"; }
+wait_for_file() {
+    local path=$1 i
+    for ((i=0; i<STATUSLINE_TEST_POLL_ATTEMPTS; i++)); do
+        [ -f "$path" ] && return 0
+        sleep "$STATUSLINE_TEST_POLL_DELAY"
+    done
+    return 1
+}
 
 RATES_5H="current ●●●●○○○○○○  42% ⟳ 7:06am"
 RATES_7D="weekly  ●○○○○○○○○○  19% ⟳ aug 10, 10:13pm"
@@ -449,6 +469,48 @@ render "$(payload)"
 assert_re "extra usage rides alongside rate limits from stdin" \
     'extra   ●●●○○○○○○○ \$12\.34/\$50\.00'
 
+# A cold cache on the stdin-rates path cannot supply extra usage yet, but it
+# should be warmed for the next render without making the current one wait.
+ASYNC_CACHE="stdin rate limits warm a cold extra-usage cache"
+if selected "$ASYNC_CACHE"; then
+    printf '%s' "$EXTRA_BODY" > "$TMP/extra-response.json"
+    clear_cache
+    (
+        render "$(payload)" CLAUDE_CODE_OAUTH_TOKEN=test-token \
+            STUB_CURL_BODY="$TMP/extra-response.json" STUB_CURL_GATE="$TMP/curl-release" \
+            STUB_CURL_WAITING="$TMP/curl-waiting" STUB_CURL_TIMED_OUT="$TMP/curl-timeout"
+        printf '%s' "$STDOUT" > "$TMP/async-render-output"
+    ) &
+    render_pid=$!
+
+    curl_waiting=false
+    wait_for_file "$TMP/curl-waiting" && curl_waiting=true
+    wait "$render_pid"
+    render_finished=false
+    if [ "$curl_waiting" = true ] && [ ! -f "$TMP/curl-timeout" ]; then
+        render_finished=true
+    fi
+    : > "$TMP/curl-release"
+
+    cache_warmed=false
+    if [ "$render_finished" = true ] && wait_for_file "$CACHE_FILE" &&
+       jq -e '.extra_usage.is_enabled == true' "$CACHE_FILE" >/dev/null 2>&1; then
+        cache_warmed=true
+    fi
+    async_output=$(<"$TMP/async-render-output")
+    expected_async="Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+    if [ "$render_finished" = true ] && [ "$async_output" = "$expected_async" ] &&
+       [ "$cache_warmed" = true ]; then
+        report_pass "$ASYNC_CACHE"
+    else
+        report_fail "$ASYNC_CACHE" \
+            "render finishes with stdin rates before release, then cache warms" \
+            "finished=$render_finished output=$(printf '%q' "$async_output") cache=$(cat "$CACHE_FILE" 2>&1)"
+    fi
+fi
+
 # Nothing on that path ever refreshes the cache, so an unbounded-age read put
 # credit amounts on screen from whenever the last refreshing render happened to
 # run. Currency of unknown age reads as current, so a stale cache drops the
@@ -499,6 +561,18 @@ if [ "$(dir_mode "$TMP/mode-probe")" = 700 ]; then
     assert_mode "$PRIVATE" "$DEFAULT_CACHE_DIR" 700
 else
     skip "$PRIVATE" "no POSIX modes on this filesystem"
+fi
+
+NONPRIVATE="a non-private cache directory is refused"
+NONPRIVATE_DIR="$TMP/nonprivate"
+mkdir -m 700 "$NONPRIVATE_DIR"
+chmod 777 "$NONPRIVATE_DIR"
+if [ "$(dir_mode "$NONPRIVATE_DIR")" = 777 ]; then
+    printf '%s' "$API_BODY" > "$NONPRIVATE_DIR/statusline-usage-cache.json"
+    render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR="$NONPRIVATE_DIR"
+    assert "$NONPRIVATE" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
+else
+    skip "$NONPRIVATE" "no POSIX modes on this filesystem"
 fi
 
 rm -rf "$TMP/xdg"
@@ -553,7 +627,7 @@ PLANTED_LINK="a symlinked cache file is not read"
 PLANTED_WRITE="nor written through"
 PLANTED_DIR="$TMP/planted"
 PLANTED_TARGET="$TMP/planted-target.json"
-mkdir -p "$PLANTED_DIR"
+mkdir -m 700 "$PLANTED_DIR"
 printf '%s' "$API_BODY" > "$PLANTED_TARGET"
 if ln -sf "$PLANTED_TARGET" "$PLANTED_DIR/statusline-usage-cache.json" 2>/dev/null &&
    sees_symlink "$PLANTED_DIR/statusline-usage-cache.json"; then
