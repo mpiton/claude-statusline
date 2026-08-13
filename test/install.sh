@@ -70,7 +70,14 @@ node_home() {
 
 # The installer stamps the release it came from into the copy it writes, so the
 # two files differ by that one line and nothing else.
-VERSION=$(node -p "require('$ROOT/package.json').version")
+# jq rather than node: node on Windows cannot require() the MSYS path $ROOT is.
+VERSION=$(jq -r .version "$ROOT/package.json")
+# An empty version turns every check below into a substring match against
+# anything, which is how a broken lookup passed CI once already.
+[ -n "$VERSION" ] || {
+    printf "  ${red}✗${reset} could not read the version out of package.json\n\n"
+    exit 1
+}
 version_of() { sed -n 's/^# statusline-version: *//p' "$1" | head -1; }
 unstamped() { sed 's/^# statusline-version:.*$/# statusline-version:/' "$1"; }
 
