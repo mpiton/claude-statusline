@@ -20,6 +20,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Nothing here runs an authenticated git command, and the test
+          # scripts are repo-controlled, so don't leave a token in .git/config
+          # for them to read.
+          persist-credentials: false
       - run: shellcheck --version
       - run: shellcheck bin/statusline.sh test/*.sh
 
@@ -32,6 +37,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Nothing here runs an authenticated git command, and the test
+          # scripts are repo-controlled, so don't leave a token in .git/config
+          # for them to read.
+          persist-credentials: false
 
       # statusline.sh branches on BSD vs GNU date/stat, so the two runners
       # exercise different halves of it. macOS also still ships bash 3.2.
@@ -64,6 +74,11 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Nothing here runs an authenticated git command, and the test
+          # scripts are repo-controlled, so don't leave a token in .git/config
+          # for them to read.
+          persist-credentials: false
       - run: bash --version | head -1
       - run: bash test/run.sh
 
@@ -72,6 +87,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Nothing here runs an authenticated git command, and the test
+          # scripts are repo-controlled, so don't leave a token in .git/config
+          # for them to read.
+          persist-credentials: false
 
       # `npm i -g` has to ship the script the installer copies; leaving it out
       # of package.json "files" would publish a tarball that installs nothing.
