@@ -28,8 +28,8 @@ done
 chmod +x "$TMP/bin"/*
 export PATH="$TMP/bin:$PATH"
 
-green='\033[32m'; red='\033[31m'; dim='\033[2m'; reset='\033[0m'
-passed=0; failed=0
+green='\033[32m'; red='\033[31m'; yellow='\033[33m'; dim='\033[2m'; reset='\033[0m'
+passed=0; failed=0; skipped=0
 
 selected() {
     [ -z "$FILTER" ] && return 0
@@ -39,6 +39,12 @@ selected() {
 report_pass() {
     printf "  ${green}✓${reset} %s\n" "$1"
     passed=$((passed + 1))
+}
+
+skip() {
+    selected "$1" || return 0
+    printf "  ${yellow}−${reset} %s ${dim}(%s)${reset}\n" "$1" "$2"
+    skipped=$((skipped + 1))
 }
 
 report_fail() {
@@ -145,6 +151,36 @@ selected "a missing dependency stops the install" && {
     fi
 }
 
+# The case above never reaches the per-dependency loop: with nothing on PATH
+# the probe cannot start bash either, and reports that instead. Here bash is
+# reachable and only jq is not, so the loop has to name jq and leave the two
+# tools it can see out of the list.
+NAMED="the probe names the one dependency that is missing"
+selected "$NAMED" && {
+    mkdir -p "$TMP/deps" "$TMP/onedep-home"
+    for stub in curl git; do
+        printf '#!/bin/bash\nexit 0\n' > "$TMP/deps/$stub"
+    done
+    chmod +x "$TMP/deps"/*
+    ln -sf "$(command -v bash)" "$TMP/deps/bash" 2>/dev/null
+
+    # Windows has no runnable bash outside the directory holding its DLLs, so
+    # the shim above is a dead end there. Ask node, the way the installer will.
+    spawns_bash='require("child_process").execFileSync("bash",["-c","exit 0"],{stdio:"ignore"})'
+    if PATH="$TMP/deps" "$(command -v node)" -e "$spawns_bash" 2>/dev/null; then
+        out=$(HOME="$TMP/onedep-home" USERPROFILE="$(node_home "$TMP/onedep-home")" \
+            PATH="$TMP/deps" "$(command -v node)" "$INSTALLER" 2>&1)
+        status=$?
+        if [ "$status" -eq 1 ] && printf '%s' "$out" | grep -q "Missing required dependencies: jq$"; then
+            report_pass "$NAMED"
+        else
+            report_fail "$NAMED" "exit 1 + jq alone in the list" "exit $status: $(printf '%q' "$out")"
+        fi
+    else
+        skip "$NAMED" "no bash outside its own directory here"
+    fi
+}
+
 # The probe was `which jq`, and execSync hands that to cmd.exe on Windows, which
 # has no `which` — so every Windows install stopped at "Missing required
 # dependencies" with all three tools installed. A `which` that fails reproduces
@@ -219,9 +255,11 @@ printf mine" "$(cat "$HOME_F/.claude/statusline.sh" 2>/dev/null)"
 
 printf "\n"
 if [ "$failed" -gt 0 ]; then
-    printf "  ${red}%d failed${reset}, %d passed\n\n" "$failed" "$passed"
+    printf "  ${red}%d failed${reset}, %d passed" "$failed" "$passed"
 else
-    printf "  ${green}%d passed${reset}\n\n" "$passed"
+    printf "  ${green}%d passed${reset}" "$passed"
 fi
+[ "$skipped" -gt 0 ] && printf ", ${yellow}%d skipped${reset}" "$skipped"
+printf "\n\n"
 
 [ "$failed" -eq 0 ]
