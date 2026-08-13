@@ -174,6 +174,20 @@ printf mine" "$(cat "$HOME_E/.claude/statusline.sh" 2>/dev/null)"
 check "the backup is consumed" "gone" \
     "$([ -e "$HOME_E/.claude/statusline.sh.bak" ] && echo present || echo gone)"
 
+# Installing twice used to copy our own script over the backup, so the user's
+# original was gone and uninstall handed back ours.
+HOME_F="$TMP/byo-twice"
+mkdir -p "$HOME_F/.claude"
+printf '#!/bin/bash\nprintf mine\n' > "$HOME_F/.claude/statusline.sh"
+install_into "$HOME_F"
+install_into "$HOME_F"
+check "a second install leaves the first backup alone" "#!/bin/bash
+printf mine" "$(cat "$HOME_F/.claude/statusline.sh.bak" 2>/dev/null)"
+
+install_into "$HOME_F" --uninstall
+check "uninstall after two installs still returns the user's script" "#!/bin/bash
+printf mine" "$(cat "$HOME_F/.claude/statusline.sh" 2>/dev/null)"
+
 # ── Summary ─────────────────────────────────────────────
 
 printf "\n"
