@@ -19,7 +19,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 export TZ=UTC
-unset CLAUDE_CODE_OAUTH_TOKEN GIT_DIR GIT_WORK_TREE
+unset CLAUDE_CODE_OAUTH_TOKEN GIT_DIR GIT_WORK_TREE XDG_CACHE_HOME
 export GIT_CEILING_DIRECTORIES="$TMP"
 
 green='\033[32m'; red='\033[31m'; yellow='\033[33m'; dim='\033[2m'; reset='\033[0m'
@@ -161,6 +161,30 @@ assert_color() {
         *"$2"*) report_pass "$1" ;;
         *) report_fail "$1" "contains $(printf '%q' "$2")" "$(printf '%q' "$RAW1")" ;;
     esac
+}
+
+# assert_dir <name> <path> — the directory a render was supposed to create.
+assert_dir() {
+    selected "$1" || return 0
+    if [ -d "$2" ]; then report_pass "$1"; else report_fail "$1" "directory $2" "$(ls -ld "$2" 2>&1)"; fi
+}
+
+# assert_file <name> <path> <contents> — a file a render was not supposed to touch.
+assert_file() {
+    selected "$1" || return 0
+    local got
+    got=$(cat "$2" 2>&1)
+    if [ "$got" = "$3" ]; then report_pass "$1"; else report_fail "$1" "$3" "$got"; fi
+}
+
+dir_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null; }
+
+# assert_mode <name> <path> <octal>
+assert_mode() {
+    selected "$1" || return 0
+    local mode
+    mode=$(dir_mode "$2")
+    if [ "$mode" = "$3" ]; then report_pass "$1"; else report_fail "$1" "mode $3" "mode ${mode:-unknown}"; fi
 }
 
 assert_no_stderr() {
@@ -377,12 +401,58 @@ clear_cache
 render "$(payload 'del(.rate_limits)')" CLAUDE_CODE_OAUTH_TOKEN=test-token
 assert "a failing API call degrades to no rate lines" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
 
-seed_cache '{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
+# On the path that does refresh, a stale cache means refetch rather than reuse.
+# The seeded body reads 99% with no weekly line, so reusing it would show.
+seed_cache '{"five_hour":{"utilization":99,"resets_at":"2026-08-06T07:06:40Z"}}'
+touch -t 200001010000 "$CACHE_FILE"
+render "$(payload 'del(.rate_limits)')" \
+    CLAUDE_CODE_OAUTH_TOKEN=test-token STUB_CURL_BODY="$TMP/api-response.json"
+assert "a stale cache is refetched, not reused" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
+EXTRA_BODY='{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
              "extra_usage":{"is_enabled":true,"utilization":30,"used_credits":1234,"monthly_limit":5000}}'
+
+seed_cache "$EXTRA_BODY"
 render "$(payload 'del(.rate_limits)')"
 # shellcheck disable=SC2016  # `\$` and `$` are regex, not shell expansions.
 assert_re "extra usage renders credits against the monthly limit" \
     'extra   ●●●○○○○○○○ \$12\.34/\$50\.00 ⟳ [a-z]{3} 1$'
+
+# Extra usage is the one thing stdin never reports, so the cache is still read
+# when stdin covered the rate limits.
+seed_cache "$EXTRA_BODY"
+render "$(payload)"
+# shellcheck disable=SC2016  # `\$` and `$` are regex, not shell expansions.
+assert_re "extra usage rides alongside rate limits from stdin" \
+    'extra   ●●●○○○○○○○ \$12\.34/\$50\.00'
+
+# Nothing on that path ever refreshes the cache, so an unbounded-age read put
+# credit amounts on screen from whenever the last refreshing render happened to
+# run. Currency of unknown age reads as current, so a stale cache drops the
+# line instead.
+seed_cache "$EXTRA_BODY"
+touch -t 200001010000 "$CACHE_FILE"
+render "$(payload)"
+assert "a stale cache drops the extra-usage line" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
+# Same body on the path that does refresh, with the refresh failing (no token to
+# make the call with). Falling back to the cache is the point — a bar behind by
+# some minutes still says something, and the reset time next to it dates it. The
+# credits have nothing dating them, so they are what the fallback drops.
+STALE_BODY='{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
+             "seven_day":{"utilization":18.7,"resets_at":"2026-08-10T22:13:20Z"},
+             "extra_usage":{"is_enabled":true,"utilization":30,"used_credits":1234,"monthly_limit":5000}}'
+seed_cache "$STALE_BODY"
+touch -t 200001010000 "$CACHE_FILE"
+render "$(payload 'del(.rate_limits)')"
+assert "a failed refresh keeps the stale bars and drops the stale credits" \
+    "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
 
 seed_cache 'not json at all'
 render "$(payload)"
@@ -390,6 +460,97 @@ assert "a corrupt cache does not break the render" "Opus 5 │ ✍️ 25% │ re
 
 $RATES"
 clear_cache
+
+section "cache directory"
+
+# Both defaults are derived rather than passed in, so these cases drop the
+# override the rest of the suite runs with.
+DEFAULT_CACHE_DIR="$HOME/.cache/claude-statusline"
+rm -rf "$HOME/.cache"
+render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR
+assert_dir "the cache lands under \$HOME/.cache by default" "$DEFAULT_CACHE_DIR"
+
+# NTFS under Git Bash reports 755 whatever mkdir was asked for, so probe the
+# filesystem with a directory of our own before holding the script to it.
+PRIVATE="a created cache directory is private"
+mkdir -m 700 "$TMP/mode-probe"
+if [ "$(dir_mode "$TMP/mode-probe")" = 700 ]; then
+    assert_mode "$PRIVATE" "$DEFAULT_CACHE_DIR" 700
+else
+    skip "$PRIVATE" "no POSIX modes on this filesystem"
+fi
+
+rm -rf "$TMP/xdg"
+render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR XDG_CACHE_HOME="$TMP/xdg"
+assert_dir "XDG_CACHE_HOME moves it" "$TMP/xdg/claude-statusline"
+
+# The shared-/tmp attack in miniature: a directory someone else can point
+# elsewhere is not written into and not read back. Without the guard the seeded
+# cache behind the link would supply the rate lines this expects to be missing.
+LINK_TARGET="$TMP/link-target"
+mkdir -p "$LINK_TARGET"
+printf '%s' "$API_BODY" > "$LINK_TARGET/statusline-usage-cache.json"
+SYMLINKED="a symlinked cache directory is refused"
+# Git Bash makes something `ln -s` calls a link and `-L` agrees with, which a
+# child handed the path through the environment no longer sees as one. Probe
+# under the conditions the render runs in rather than the ones here.
+# shellcheck disable=SC2016  # $L expands in the child, which is the whole point.
+sees_symlink() { [ "$(env L="$1" bash -c '[ -L "$L" ] && echo yes')" = yes ]; }
+if ln -s "$LINK_TARGET" "$TMP/link" 2>/dev/null && sees_symlink "$TMP/link"; then
+    render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR="$TMP/link"
+    assert "$SYMLINKED" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
+else
+    skip "$SYMLINKED" "no symlink support here"
+fi
+
+# The other half, and the case the move is for: a directory someone else owns
+# holding a cache file this user can still write. /tmp is that directory on any
+# multi-user host — which is what the old default sat in. Skipped where /tmp is
+# this user's own (Git Bash) or a symlink the case above already covers (macOS).
+FOREIGN="a cache directory owned by someone else is refused"
+FOREIGN_CACHE="/tmp/statusline-usage-cache.json"
+if [ -O /tmp ] || [ -L /tmp ]; then
+    skip "$FOREIGN" "/tmp is not another user's here"
+# This fixture writes a predictable name into a directory anyone can write, so
+# it is open to the very trick it exists to test: whatever already sits at that
+# path could be someone else's symlink pointing at a file this user owns.
+# `noclobber` opens with O_EXCL, so either nothing is there or there is no
+# fixture. Anything left behind by a killed run skips the case rather than
+# being cleared, since by then it is no longer ours to judge.
+elif ! (set -o noclobber; printf '%s' "$API_BODY" > "$FOREIGN_CACHE") 2>/dev/null; then
+    skip "$FOREIGN" "$FOREIGN_CACHE is not ours to create"
+else
+    render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR=/tmp
+    assert "$FOREIGN" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
+    rm -f "$FOREIGN_CACHE"
+fi
+
+# A directory clearing every check above can still hold a file that did not come
+# from here: it may predate this script, or CLAUDE_STATUSLINE_CACHE_DIR may point
+# somewhere the caller left group-writable. So the files get checked too.
+PLANTED_LINK="a symlinked cache file is not read"
+PLANTED_WRITE="nor written through"
+PLANTED_DIR="$TMP/planted"
+PLANTED_TARGET="$TMP/planted-target.json"
+mkdir -p "$PLANTED_DIR"
+printf '%s' "$API_BODY" > "$PLANTED_TARGET"
+if ln -sf "$PLANTED_TARGET" "$PLANTED_DIR/statusline-usage-cache.json" 2>/dev/null &&
+   sees_symlink "$PLANTED_DIR/statusline-usage-cache.json"; then
+    # Without the read guard the body behind the link supplies these rate lines.
+    render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR="$PLANTED_DIR"
+    assert "$PLANTED_LINK" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
+
+    # And the more damaging half: a refresh that succeeds would truncate whatever
+    # the link points at. Here that is a file of ours; in the real version of this
+    # it is whichever of the user's files the attacker named.
+    printf 'not the cache' > "$PLANTED_TARGET"
+    render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR="$PLANTED_DIR" \
+        CLAUDE_CODE_OAUTH_TOKEN=test-token STUB_CURL_BODY="$TMP/api-response.json"
+    assert_file "$PLANTED_WRITE" "$PLANTED_TARGET" 'not the cache'
+else
+    skip "$PLANTED_LINK" "no symlink support here"
+    skip "$PLANTED_WRITE" "no symlink support here"
+fi
 
 section "locale"
 

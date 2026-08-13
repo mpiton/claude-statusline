@@ -152,6 +152,43 @@ iso_to_epoch() {
     [ -n "$ISO_EPOCH" ]
 }
 
+# The cache directory can predate this script, or be pointed somewhere loose
+# by CLAUDE_STATUSLINE_CACHE_DIR, so the mode it was created with is no
+# guarantee about what is inside it. Check each file rather than the directory
+# holding it: a symlink, or a regular file this user does not own, is something
+# somebody else put there.
+#
+# <path> → true when the file is there and is ours to read. An empty path is
+# the "caching is off" case.
+cache_readable() {
+    [ -n "$1" ] && [ -f "$1" ] && [ ! -L "$1" ] && [ -O "$1" ]
+}
+
+# <path> → true when writing to it either creates a file or truncates our own.
+# Without this a planted symlink would have this render overwrite whatever it
+# points at, with content an attacker who can also answer the API controls.
+cache_writable() {
+    [ -n "$1" ] || return 1
+    [ -e "$1" ] || [ -L "$1" ] || return 0
+    cache_readable "$1"
+}
+
+# <path> → true when the file exists and is younger than $cache_max_age. An
+# empty path is the "caching is off" case and is never fresh.
+cache_is_fresh() {
+    cache_readable "$1" || return 1
+    local mtime now
+    if [ "$date_flavor" = gnu ]; then
+        mtime=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)
+    else
+        mtime=$(stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null)
+    fi
+    is_num "$mtime" || return 1
+    now=${EPOCHSECONDS:-}
+    [ -n "$now" ] || now=$(date +%s)
+    [ "$(( now - mtime ))" -lt "$cache_max_age" ]
+}
+
 # ── Extract JSON data ───────────────────────────────────
 # One jq pass for everything stdin carries; this used to be eleven `echo | jq`
 # pipelines, so eleven subshells and eleven jq processes per render.
@@ -197,11 +234,31 @@ if [ -z "$effort" ]; then
     fi
 fi
 
-cache_dir="${CLAUDE_STATUSLINE_CACHE_DIR:-/tmp/claude}"
-cache_file="$cache_dir/statusline-usage-cache.json"
-dirty_cache="$cache_dir/statusline-dirty-cache"
+# The cache lives under the user's own cache root. The old default was a fixed
+# name in a world-writable /tmp, which any other user on the host can create,
+# or point a symlink at, before the first render — and everything read back out
+# of these files is then theirs to choose: the git dirty flag, and the credit
+# amounts this renders as currency.
+#
+# A directory that is a symlink, or that someone else owns, turns caching off
+# rather than being written into. The empty paths that leaves fail closed
+# through cache_readable/cache_writable, which vet the individual files too —
+# the directory passing does not mean everything inside it came from here.
+cache_dir="${CLAUDE_STATUSLINE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline}"
 cache_max_age=60
-[ -d "$cache_dir" ] || mkdir -p "$cache_dir"
+# `mkdir -p -m` is the case SC2174 warns about — the mode reaches the deepest
+# directory only, and MSYS drops it altogether — so set it separately. Only on
+# a directory this render created: an existing one keeps whatever mode it has.
+if [ ! -d "$cache_dir" ]; then
+    mkdir -p "$cache_dir" 2>/dev/null && chmod 700 "$cache_dir" 2>/dev/null
+fi
+if [ -d "$cache_dir" ] && [ ! -L "$cache_dir" ] && [ -O "$cache_dir" ]; then
+    cache_file="$cache_dir/statusline-usage-cache.json"
+    dirty_cache="$cache_dir/statusline-dirty-cache"
+else
+    cache_file=""
+    dirty_cache=""
+fi
 
 # ── LINE 1: Model │ Context % │ Directory (branch) │ Effort ──
 color_for_pct "$pct_used"
@@ -226,7 +283,7 @@ if [ -n "$git_branch" ]; then
     # decide whether to fork `git`.
     now_s=${EPOCHSECONDS:-}
     dirty_hit=""
-    if [ -n "$now_s" ] && [ -f "$dirty_cache" ]; then
+    if [ -n "$now_s" ] && cache_readable "$dirty_cache"; then
         # The entry is written without a trailing newline, so `read` reports EOF
         # and returns non-zero even though it filled the fields.
         IFS=$'\x1f' read -r cached_expiry cached_dirty cached_cwd < "$dirty_cache"
@@ -242,7 +299,7 @@ if [ -n "$git_branch" ]; then
         if [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)" ]; then
             git_dirty="*"
         fi
-        if [ -n "$now_s" ]; then
+        if [ -n "$now_s" ] && cache_writable "$dirty_cache"; then
             printf '%s\x1f%s\x1f%s' "$(( now_s + 2 ))" "$git_dirty" "$cwd" \
                 > "$dirty_cache" 2>/dev/null
         fi
@@ -303,23 +360,15 @@ fi
 
 # ── Fallback: API call (cached) ────────────────────────
 usage_data=""
+usage_stale=false
 extra_enabled="false"
 
 if ! $has_stdin_rates; then
     needs_refresh=true
 
-    if [ -f "$cache_file" ]; then
-        if [ "$date_flavor" = gnu ]; then
-            cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null)
-        else
-            cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null)
-        fi
-        now=${EPOCHSECONDS:-}
-        [ -n "$now" ] || now=$(date +%s)
-        if is_num "$cache_mtime" && [ "$(( now - cache_mtime ))" -lt "$cache_max_age" ]; then
-            needs_refresh=false
-            usage_data=$(<"$cache_file")
-        fi
+    if cache_is_fresh "$cache_file"; then
+        needs_refresh=false
+        usage_data=$(<"$cache_file")
     fi
 
     if $needs_refresh; then
@@ -357,16 +406,26 @@ if ! $has_stdin_rates; then
                 "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
             if [ -n "$response" ] && jq -e '.five_hour' <<< "$response" >/dev/null 2>&1; then
                 usage_data="$response"
-                printf '%s' "$response" > "$cache_file"
+                cache_writable "$cache_file" && printf '%s' "$response" > "$cache_file" 2>/dev/null
             fi
         fi
-        if [ -z "$usage_data" ] && [ -f "$cache_file" ]; then
+        if [ -z "$usage_data" ] && cache_readable "$cache_file"; then
+            # The refresh failed — no token, or the call did not come back. A
+            # rate-limit bar that is behind still says something, and the reset
+            # time it renders alongside dates it, so the last known body beats
+            # blanking the whole block. What it is too old for is below.
             usage_data=$(<"$cache_file")
+            usage_stale=true
         fi
     fi
-elif [ -f "$cache_file" ]; then
+elif cache_is_fresh "$cache_file"; then
     # stdin already carried the rate limits; the cache is only still worth
     # reading for the extra-usage block, which stdin does not report.
+    #
+    # Nothing on this path ever refreshes the cache, so without the age check
+    # the credit amounts came from whenever the last render that did refresh
+    # happened to run, with nothing bounding how long ago that was. Currency
+    # figures of unknown age read as current, so a stale cache drops the line.
     usage_data=$(<"$cache_file")
 fi
 
@@ -387,6 +446,11 @@ if [ -n "$usage_data" ]; then
     if [ -n "$api_fields" ]; then
         IFS=$'\x1f' read -r api_five_pct api_five_reset api_seven_pct api_seven_reset \
             extra_enabled api_extra_pct api_extra_used api_extra_limit <<< "$api_fields"
+
+        # Nothing dates the credit figures the way a reset time dates a bar, so
+        # a body of unbounded age keeps its bars and loses its currency. Money
+        # that reads as current and is not is worse than no money line.
+        $usage_stale && extra_enabled="false"
 
         if ! $has_stdin_rates; then
             printf -v five_hour_pct "%.0f" "$api_five_pct"
