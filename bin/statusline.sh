@@ -1,4 +1,5 @@
 #!/bin/bash
+# statusline-version: dev
 set -f
 
 # Force C locale: `printf %.0f` rejects "42.3" when LC_NUMERIC uses a comma,
