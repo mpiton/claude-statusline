@@ -204,18 +204,39 @@ assert "dirty worktree gets a star" "Opus 5 │ ✍️ 25% │ repo-dirty (main*
 
 $RATES"
 
-# The dirty flag is cached for a couple of seconds to skip a worktree walk per
-# render. These two renders land inside that window, so a cache keyed on
-# anything coarser than the directory would carry the star across.
+# The dirty flag is cached to skip a worktree walk per render. The entry is
+# seeded rather than inherited from the case above: leaving it to residue would
+# let these pass on a slow runner, where the real entry has expired before the
+# render that is supposed to reject it. The expiry is far enough out that no
+# case has to reason about the clock.
+DIRTY_CACHE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-dirty-cache"
+seed_dirty() { printf '%s\x1f%s\x1f%s\n' 9999999999 "$1" "$2" > "$DIRTY_CACHE"; }
+
+seed_dirty '*' "$REPO_DIRTY"
 render "$(payload)"
-assert "the cached dirty flag does not leak into another directory" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+assert "a cached dirty flag does not leak into another directory" "Opus 5 │ ✍️ 25% │ repo-clean (main)
 
 $RATES"
 
+seed_dirty '' "$REPO_CLEAN"
 render "$(payload '.cwd = "'"$REPO_DIRTY"'"')"
-assert "nor does the cached clean flag" "Opus 5 │ ✍️ 25% │ repo-dirty (main*)
+assert "nor does a cached clean flag" "Opus 5 │ ✍️ 25% │ repo-dirty (main*)
 
 $RATES"
+
+# The other half: a cache nothing reads would pass both cases above. A clean
+# worktree printing a star can only come from the cached entry.
+CACHED="a cached flag is reused within its own directory"
+if [ -z "${EPOCHSECONDS:-}" ]; then
+    skip "$CACHED" "no \$EPOCHSECONDS before bash 5"
+else
+    seed_dirty '*' "$REPO_CLEAN"
+    render "$(payload)"
+    assert "$CACHED" "Opus 5 │ ✍️ 25% │ repo-clean (main*)
+
+$RATES"
+fi
+rm -f "$DIRTY_CACHE"
 
 render "$(payload 'del(.model)')"
 assert_line1_re "missing model falls back to Claude" '^Claude │'
