@@ -169,11 +169,13 @@ assert_dir() {
     if [ -d "$2" ]; then report_pass "$1"; else report_fail "$1" "directory $2" "$(ls -ld "$2" 2>&1)"; fi
 }
 
+dir_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null; }
+
 # assert_mode <name> <path> <octal>
 assert_mode() {
     selected "$1" || return 0
     local mode
-    mode=$(stat -c %a "$2" 2>/dev/null || stat -f %Lp "$2" 2>/dev/null)
+    mode=$(dir_mode "$2")
     if [ "$mode" = "$3" ]; then report_pass "$1"; else report_fail "$1" "mode $3" "mode ${mode:-unknown}"; fi
 }
 
@@ -444,7 +446,16 @@ DEFAULT_CACHE_DIR="$HOME/.cache/claude-statusline"
 rm -rf "$HOME/.cache"
 render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR
 assert_dir "the cache lands under \$HOME/.cache by default" "$DEFAULT_CACHE_DIR"
-assert_mode "a created cache directory is private" "$DEFAULT_CACHE_DIR" 700
+
+# NTFS under Git Bash reports 755 whatever mkdir was asked for, so probe the
+# filesystem with a directory of our own before holding the script to it.
+PRIVATE="a created cache directory is private"
+mkdir -m 700 "$TMP/mode-probe"
+if [ "$(dir_mode "$TMP/mode-probe")" = 700 ]; then
+    assert_mode "$PRIVATE" "$DEFAULT_CACHE_DIR" 700
+else
+    skip "$PRIVATE" "no POSIX modes on this filesystem"
+fi
 
 rm -rf "$TMP/xdg"
 render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR XDG_CACHE_HOME="$TMP/xdg"
@@ -457,7 +468,9 @@ LINK_TARGET="$TMP/link-target"
 mkdir -p "$LINK_TARGET"
 printf '%s' "$API_BODY" > "$LINK_TARGET/statusline-usage-cache.json"
 SYMLINKED="a symlinked cache directory is refused"
-if ln -s "$LINK_TARGET" "$TMP/link" 2>/dev/null; then
+# `ln -s` on Git Bash copies instead of linking unless MSYS is configured for
+# native symlinks, so having run it is not proof there is a link to refuse.
+if ln -s "$LINK_TARGET" "$TMP/link" 2>/dev/null && [ -L "$TMP/link" ]; then
     render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR="$TMP/link"
     assert "$SYMLINKED" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
 else
