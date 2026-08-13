@@ -215,6 +215,13 @@ assert_line1_re "context percentage tracks token usage" '✍️ 100%'
 render "$(payload '.context_window.context_window_size = 0')"
 assert_line1_re "zero window size falls back to 200k" '✍️ 25%'
 
+# A size of the wrong type used to survive the `-eq 0` guard — the test errors
+# out instead of comparing, the fallback never fires, and the percentage silently
+# reads 0 for the rest of the render.
+render "$(payload '.context_window.context_window_size = "wide"')"
+assert_line1_re "a non-numeric window size falls back to 200k" '✍️ 25%'
+assert_no_stderr "a non-numeric window size does not warn"
+
 render "$(payload '.context_window.current_usage.cache_read_input_tokens = 46000')"
 assert_color "context under 50% is green" $'\033[38;2;0;175;80m25%'
 
@@ -259,6 +266,14 @@ current ●●●●●●●●○○  88% ⟳ 7:06am"
 
 render "$(payload '.rate_limits.five_hour.used_percentage = 42.3')"
 assert_no_stderr "fractional percentages do not warn"
+
+# A reset time of 0 or null means "unknown", not "midnight 1970".
+for missing in 0 null; do
+    render "$(payload ".rate_limits.five_hour.resets_at = $missing | del(.rate_limits.seven_day)")"
+    assert "a $missing reset time drops the ⟳ suffix" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+current ●●●●○○○○○○  42%"
+done
 
 section "rate limits from the API cache"
 

@@ -5,12 +5,14 @@ set -f
 # and `date` emits localized month names with no am/pm designator.
 export LC_ALL=C
 
-input=$(cat)
-
-if [ -z "$input" ]; then
-    printf "Claude"
-    exit 0
-fi
+# `read -d ''` consumes stdin without forking `cat`. It keeps the trailing
+# newline that a command substitution would have stripped, which only matters
+# for deciding whether anything was piped in at all.
+IFS= read -r -d '' input
+case "$input" in
+    *[!$' \t\n']*) ;;
+    *) printf "Claude"; exit 0 ;;
+esac
 
 # ── Colors ──────────────────────────────────────────────
 blue='\033[38;2;0;153;255m'
@@ -26,111 +28,168 @@ reset='\033[0m'
 
 sep=" ${dim}│${reset} "
 
+months=(jan feb mar apr may jun jul aug sep oct nov dec)
+
 # ── Helpers ─────────────────────────────────────────────
+# These hand their result back through a global rather than stdout. A status
+# line renders on every turn, and `x=$(f)` forks a subshell for each call.
+
+# Bare non-negative integer — the only thing the arithmetic below accepts.
+is_num() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+# color_for_pct <pct> → $COLOR
 color_for_pct() {
     local pct=$1
-    if [ "$pct" -ge 90 ]; then printf '%b' "$red"
-    elif [ "$pct" -ge 70 ]; then printf '%b' "$yellow"
-    elif [ "$pct" -ge 50 ]; then printf '%b' "$orange"
-    else printf '%b' "$green"
+    is_num "$pct" || pct=0
+    if   [ "$pct" -ge 90 ]; then COLOR=$red
+    elif [ "$pct" -ge 70 ]; then COLOR=$yellow
+    elif [ "$pct" -ge 50 ]; then COLOR=$orange
+    else COLOR=$green
     fi
 }
 
+# build_bar <pct> <width> → $BAR, and $COLOR for the percentage beside it.
 build_bar() {
-    local pct=$1
-    local width=$2
-    [ "$pct" -lt 0 ] 2>/dev/null && pct=0
-    [ "$pct" -gt 100 ] 2>/dev/null && pct=100
+    local pct=$1 width=$2 i
+    is_num "$pct" || pct=0
+    [ "$pct" -gt 100 ] && pct=100
 
     local filled=$(( pct * width / 100 ))
     local empty=$(( width - filled ))
-    local bar_color
-    bar_color=$(color_for_pct "$pct")
-
     local filled_str="" empty_str=""
     for ((i=0; i<filled; i++)); do filled_str+="●"; done
     for ((i=0; i<empty; i++)); do empty_str+="○"; done
 
-    printf '%b' "${bar_color}${filled_str}${dim}${empty_str}${reset}"
+    color_for_pct "$pct"
+    BAR="${COLOR}${filled_str}${dim}${empty_str}${reset}"
 }
 
+# GNU date takes `-d @EPOCH`, BSD date takes `-r EPOCH`. Trying one and falling
+# back to the other burned a fork per timestamp on whichever platform lost the
+# coin toss, so guess from $OSTYPE — which costs nothing — and only probe the
+# other dialect if the guess comes back empty. A mac with GNU coreutils ahead
+# of /bin on PATH is the case that needs the fallback.
+case "$OSTYPE" in
+    darwin*|*bsd*) date_flavor=bsd ;;
+    *)             date_flavor=gnu ;;
+esac
+
+# date_fields <epoch> <strftime> → $DATE_OUT
+date_fields() {
+    local epoch=$1 fmt=$2
+    if [ "$date_flavor" = gnu ]; then
+        DATE_OUT=$(date -d "@$epoch" +"$fmt" 2>/dev/null)
+        [ -n "$DATE_OUT" ] && return 0
+        date_flavor=bsd
+        DATE_OUT=$(date -r "$epoch" +"$fmt" 2>/dev/null)
+    else
+        DATE_OUT=$(date -r "$epoch" +"$fmt" 2>/dev/null)
+        [ -n "$DATE_OUT" ] && return 0
+        date_flavor=gnu
+        DATE_OUT=$(date -d "@$epoch" +"$fmt" 2>/dev/null)
+    fi
+    [ -n "$DATE_OUT" ]
+}
+
+# format_epoch_time <epoch> <time|datetime|date> → $FMT_TIME
+#
+# One `date` call yields every field and bash assembles the rest. Only POSIX
+# conversion specs go in the format string: `%-d` and `%l` are GNU extensions,
+# and the lowercasing they used to need went through `sed` and `tr` because
+# ${x,,} is bash 4 and macOS still ships 3.2.
 format_epoch_time() {
-    local epoch=$1
-    local style=$2
-    [ -z "$epoch" ] || [ "$epoch" = "null" ] || [ "$epoch" = "0" ] && return
+    FMT_TIME=""
+    case "$1" in ''|null|0) return ;; esac
+    date_fields "$1" "%m %d %I %M %p" || return
 
-    local result=""
-    case "$style" in
-        time)
-            result=$(date -j -r "$epoch" +"%l:%M%p" 2>/dev/null)
-            [ -z "$result" ] && result=$(date -d "@$epoch" +"%l:%M%P" 2>/dev/null)
-            result=$(echo "$result" | sed 's/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
-            ;;
-        datetime)
-            result=$(date -j -r "$epoch" +"%b %-d, %l:%M%p" 2>/dev/null)
-            [ -z "$result" ] && result=$(date -d "@$epoch" +"%b %-d, %l:%M%P" 2>/dev/null)
-            result=$(echo "$result" | sed 's/  / /g; s/^ //; s/\.//g' | tr '[:upper:]' '[:lower:]')
-            ;;
-        *)
-            result=$(date -j -r "$epoch" +"%b %-d" 2>/dev/null)
-            [ -z "$result" ] && result=$(date -d "@$epoch" +"%b %-d" 2>/dev/null)
-            result=$(echo "$result" | tr '[:upper:]' '[:lower:]')
-            ;;
+    local mo dy hh mi ap
+    read -r mo dy hh mi ap <<< "$DATE_OUT"
+    is_num "$mo" || return
+    dy=${dy#0}
+    hh=${hh#0}
+    case "$ap" in [Aa]*) ap=am ;; *) ap=pm ;; esac
+
+    local mon=${months[$(( 10#$mo - 1 ))]}
+    case "$2" in
+        time)     FMT_TIME="${hh}:${mi}${ap}" ;;
+        datetime) FMT_TIME="${mon} ${dy}, ${hh}:${mi}${ap}" ;;
+        *)        FMT_TIME="${mon} ${dy}" ;;
     esac
-    printf "%s" "$result"
 }
 
+# iso_to_epoch <iso8601> → $ISO_EPOCH, empty when unparseable.
 iso_to_epoch() {
-    local iso_str="$1"
+    local iso_str="$1" stripped tz=""
+    ISO_EPOCH=""
 
-    local epoch
-    epoch=$(date -d "${iso_str}" +%s 2>/dev/null)
-    if [ -n "$epoch" ]; then
-        echo "$epoch"
-        return 0
+    if [ "$date_flavor" = gnu ]; then
+        ISO_EPOCH=$(date -d "$iso_str" +%s 2>/dev/null)
+        [ -n "$ISO_EPOCH" ] && return 0
     fi
 
-    local stripped="${iso_str%%.*}"
+    stripped="${iso_str%%.*}"
     stripped="${stripped%%Z}"
     stripped="${stripped%%+*}"
     stripped="${stripped%%-[0-9][0-9]:[0-9][0-9]}"
 
-    if [[ "$iso_str" == *"Z"* ]] || [[ "$iso_str" == *"+00:00"* ]] || [[ "$iso_str" == *"-00:00"* ]]; then
-        epoch=$(env TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "$stripped" +%s 2>/dev/null)
-        [ -z "$epoch" ] && epoch=$(env TZ=UTC date -d "${stripped/T/ }" +%s 2>/dev/null)
+    case "$iso_str" in
+        *Z*|*"+00:00"*|*"-00:00"*) tz=UTC ;;
+    esac
+
+    if [ -n "$tz" ]; then
+        ISO_EPOCH=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "$stripped" +%s 2>/dev/null)
+        [ -z "$ISO_EPOCH" ] && ISO_EPOCH=$(TZ=UTC date -d "${stripped/T/ }" +%s 2>/dev/null)
     else
-        epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$stripped" +%s 2>/dev/null)
-        [ -z "$epoch" ] && epoch=$(date -d "${stripped/T/ }" +%s 2>/dev/null)
+        ISO_EPOCH=$(date -j -f "%Y-%m-%dT%H:%M:%S" "$stripped" +%s 2>/dev/null)
+        [ -z "$ISO_EPOCH" ] && ISO_EPOCH=$(date -d "${stripped/T/ }" +%s 2>/dev/null)
     fi
 
-    if [ -n "$epoch" ]; then
-        echo "$epoch"
-        return 0
-    fi
-
-    return 1
+    [ -n "$ISO_EPOCH" ]
 }
 
 # ── Extract JSON data ───────────────────────────────────
-model_name=$(echo "$input" | jq -r '.model.display_name // "Claude"')
+# One jq pass for everything stdin carries; this used to be eleven `echo | jq`
+# pipelines, so eleven subshells and eleven jq processes per render.
+#
+# U+001F separates the fields because `read` collapses runs of whitespace
+# delimiters, and one empty field would then shift every field after it.
+# `numbers` rejects a value of the wrong type, so a garbage context window size
+# falls back to 200k instead of poisoning the arithmetic downstream.
+fields=$(jq -r '[
+    (.model.display_name // "Claude"),
+    ((.context_window.context_window_size | numbers | floor | select(. > 0)) // 200000),
+    ((.context_window.current_usage.input_tokens | numbers | floor) // 0),
+    ((.context_window.current_usage.cache_creation_input_tokens | numbers | floor) // 0),
+    ((.context_window.current_usage.cache_read_input_tokens | numbers | floor) // 0),
+    (.effort.level // ""),
+    (.cwd // ""),
+    ((.rate_limits.five_hour.used_percentage | numbers) // ""),
+    (.rate_limits.five_hour.resets_at // ""),
+    ((.rate_limits.seven_day.used_percentage | numbers) // ""),
+    (.rate_limits.seven_day.resets_at // "")
+] | map(tostring) | join("\u001f")' <<< "$input" 2>/dev/null)
 
-size=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
-[ "$size" -eq 0 ] 2>/dev/null && size=200000
+IFS=$'\x1f' read -r model_name size input_tokens cache_create cache_read \
+    effort cwd stdin_five_pct stdin_five_reset stdin_seven_pct stdin_seven_reset \
+    <<< "$fields"
 
-input_tokens=$(echo "$input" | jq -r '.context_window.current_usage.input_tokens // 0')
-cache_create=$(echo "$input" | jq -r '.context_window.current_usage.cache_creation_input_tokens // 0')
-cache_read=$(echo "$input" | jq -r '.context_window.current_usage.cache_read_input_tokens // 0')
+# Malformed stdin leaves every field empty; render the bare fallbacks.
+[ -n "$model_name" ] || model_name="Claude"
+is_num "$size" || size=200000
+is_num "$input_tokens" || input_tokens=0
+is_num "$cache_create" || cache_create=0
+is_num "$cache_read" || cache_read=0
+
 current=$(( input_tokens + cache_create + cache_read ))
-
-if [ "$size" -gt 0 ]; then
-    pct_used=$(( current * 100 / size ))
-else
-    pct_used=0
-fi
+pct_used=$(( current * 100 / size ))
 
 # Live session effort comes from stdin and follows /effort. settings.json is a
 # fallback for CLI versions that don't emit `.effort`, and goes stale otherwise.
-effort=$(echo "$input" | jq -r '.effort.level // empty')
 if [ -z "$effort" ]; then
     settings_path="$HOME/.claude/settings.json"
     if [ -f "$settings_path" ]; then
@@ -138,26 +197,45 @@ if [ -z "$effort" ]; then
     fi
 fi
 
-# ── LINE 1: Model │ Context % │ Directory (branch) │ Effort ──
-pct_color=$(color_for_pct "$pct_used")
-cwd=$(echo "$input" | jq -r '.cwd // ""')
-[ -z "$cwd" ] || [ "$cwd" = "null" ] && cwd=$(pwd)
-dirname=$(basename "$cwd")
+cache_dir="${CLAUDE_STATUSLINE_CACHE_DIR:-/tmp/claude}"
+cache_file="$cache_dir/statusline-usage-cache.json"
+cache_max_age=60
+[ -d "$cache_dir" ] || mkdir -p "$cache_dir"
 
-git_branch=""
+# ── LINE 1: Model │ Context % │ Directory (branch) │ Effort ──
+color_for_pct "$pct_used"
+pct_color=$COLOR
+
+case "$cwd" in ''|null) cwd=$PWD ;; esac
+dirname=${cwd%/}
+dirname=${dirname##*/}
+[ -n "$dirname" ] || dirname=/
+
+# `symbolic-ref` already fails outside a work tree, so the separate
+# `rev-parse --is-inside-work-tree` probe was a fork spent on a question its
+# answer covers. A detached HEAD prints no branch either way.
+git_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
 git_dirty=""
-if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    git_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
+if [ -n "$git_branch" ]; then
     if [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)" ]; then
         git_dirty="*"
     fi
 fi
 
-skip_perms=""
-parent_cmd=$(ps -o args= -p "$PPID" 2>/dev/null)
-if [[ "$parent_cmd" == *"--dangerously-skip-permissions"* ]]; then
-    skip_perms="⚡  "
+# /proc/PID/cmdline is NUL-separated argv and costs no fork to read; `ps` is
+# the fallback for macOS and Git Bash.
+parent_cmd=""
+if [ -r "/proc/$PPID/cmdline" ]; then
+    while IFS= read -r -d '' parent_arg; do
+        parent_cmd+=" $parent_arg"
+    done < "/proc/$PPID/cmdline"
+else
+    parent_cmd=$(ps -o args= -p "$PPID" 2>/dev/null)
 fi
+skip_perms=""
+case "$parent_cmd" in
+    *--dangerously-skip-permissions*) skip_perms="⚡  " ;;
+esac
 
 line1="${blue}${model_name}${reset}"
 line1+="${sep}"
@@ -186,21 +264,17 @@ five_hour_reset_epoch=""
 seven_day_pct=""
 seven_day_reset_epoch=""
 
-stdin_five_pct=$(echo "$input" | jq -r '.rate_limits.five_hour.used_percentage // empty')
 if [ -n "$stdin_five_pct" ]; then
     has_stdin_rates=true
-    five_hour_pct=$(printf "%.0f" "$stdin_five_pct")
-    five_hour_reset_epoch=$(echo "$input" | jq -r '.rate_limits.five_hour.resets_at // empty')
-    seven_day_pct=$(echo "$input" | jq -r '.rate_limits.seven_day.used_percentage // empty' | awk '{printf "%.0f", $1}')
-    seven_day_reset_epoch=$(echo "$input" | jq -r '.rate_limits.seven_day.resets_at // empty')
+    printf -v five_hour_pct "%.0f" "$stdin_five_pct"
+    five_hour_reset_epoch=$stdin_five_reset
+    if [ -n "$stdin_seven_pct" ]; then
+        printf -v seven_day_pct "%.0f" "$stdin_seven_pct"
+        seven_day_reset_epoch=$stdin_seven_reset
+    fi
 fi
 
 # ── Fallback: API call (cached) ────────────────────────
-cache_dir="${CLAUDE_STATUSLINE_CACHE_DIR:-/tmp/claude}"
-cache_file="$cache_dir/statusline-usage-cache.json"
-cache_max_age=60
-mkdir -p "$cache_dir"
-
 usage_data=""
 extra_enabled="false"
 
@@ -208,12 +282,16 @@ if ! $has_stdin_rates; then
     needs_refresh=true
 
     if [ -f "$cache_file" ]; then
-        cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null)
-        now=$(date +%s)
-        cache_age=$(( now - cache_mtime ))
-        if [ "$cache_age" -lt "$cache_max_age" ]; then
+        if [ "$date_flavor" = gnu ]; then
+            cache_mtime=$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null)
+        else
+            cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || stat -c %Y "$cache_file" 2>/dev/null)
+        fi
+        now=${EPOCHSECONDS:-}
+        [ -n "$now" ] || now=$(date +%s)
+        if is_num "$cache_mtime" && [ "$(( now - cache_mtime ))" -lt "$cache_max_age" ]; then
             needs_refresh=false
-            usage_data=$(cat "$cache_file" 2>/dev/null)
+            usage_data=$(<"$cache_file")
         fi
     fi
 
@@ -224,7 +302,7 @@ if ! $has_stdin_rates; then
         elif command -v security >/dev/null 2>&1; then
             blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
             if [ -n "$blob" ]; then
-                token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+                token=$(jq -r '.claudeAiOauth.accessToken // empty' <<< "$blob" 2>/dev/null)
             fi
         fi
         if [ -z "$token" ] || [ "$token" = "null" ]; then
@@ -237,7 +315,7 @@ if ! $has_stdin_rates; then
             if command -v secret-tool >/dev/null 2>&1; then
                 blob=$(timeout 2 secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
                 if [ -n "$blob" ]; then
-                    token=$(echo "$blob" | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null)
+                    token=$(jq -r '.claudeAiOauth.accessToken // empty' <<< "$blob" 2>/dev/null)
                 fi
             fi
         fi
@@ -250,31 +328,44 @@ if ! $has_stdin_rates; then
                 -H "anthropic-beta: oauth-2025-04-20" \
                 -H "User-Agent: claude-code/2.1.34" \
                 "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
-            if [ -n "$response" ] && echo "$response" | jq -e '.five_hour' >/dev/null 2>&1; then
+            if [ -n "$response" ] && jq -e '.five_hour' <<< "$response" >/dev/null 2>&1; then
                 usage_data="$response"
-                echo "$response" > "$cache_file"
+                printf '%s' "$response" > "$cache_file"
             fi
         fi
         if [ -z "$usage_data" ] && [ -f "$cache_file" ]; then
-            usage_data=$(cat "$cache_file" 2>/dev/null)
+            usage_data=$(<"$cache_file")
         fi
     fi
+elif [ -f "$cache_file" ]; then
+    # stdin already carried the rate limits; the cache is only still worth
+    # reading for the extra-usage block, which stdin does not report.
+    usage_data=$(<"$cache_file")
+fi
 
-    if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
-        five_hour_pct=$(echo "$usage_data" | jq -r '.five_hour.utilization // 0' | awk '{printf "%.0f", $1}')
-        five_hour_reset_iso=$(echo "$usage_data" | jq -r '.five_hour.resets_at // empty')
-        five_hour_reset_epoch=$(iso_to_epoch "$five_hour_reset_iso")
-        seven_day_pct=$(echo "$usage_data" | jq -r '.seven_day.utilization // 0' | awk '{printf "%.0f", $1}')
-        seven_day_reset_iso=$(echo "$usage_data" | jq -r '.seven_day.resets_at // empty')
-        seven_day_reset_epoch=$(iso_to_epoch "$seven_day_reset_iso")
+# One jq pass over whichever payload we ended up with. A parse failure leaves
+# every field empty, which is how a corrupt cache stays harmless.
+if [ -n "$usage_data" ]; then
+    api_fields=$(jq -r '[
+        ((.five_hour.utilization | numbers) // 0),
+        (.five_hour.resets_at // ""),
+        ((.seven_day.utilization | numbers) // 0),
+        (.seven_day.resets_at // ""),
+        (.extra_usage.is_enabled // false),
+        ((.extra_usage.utilization | numbers) // 0),
+        (((.extra_usage.used_credits | numbers) // 0) / 100),
+        (((.extra_usage.monthly_limit | numbers) // 0) / 100)
+    ] | map(tostring) | join("\u001f")' <<< "$usage_data" 2>/dev/null)
 
-        extra_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false')
-    fi
-else
-    if [ -f "$cache_file" ]; then
-        usage_data=$(cat "$cache_file" 2>/dev/null)
-        if [ -n "$usage_data" ] && echo "$usage_data" | jq -e . >/dev/null 2>&1; then
-            extra_enabled=$(echo "$usage_data" | jq -r '.extra_usage.is_enabled // false')
+    if [ -n "$api_fields" ]; then
+        IFS=$'\x1f' read -r api_five_pct api_five_reset api_seven_pct api_seven_reset \
+            extra_enabled api_extra_pct api_extra_used api_extra_limit <<< "$api_fields"
+
+        if ! $has_stdin_rates; then
+            printf -v five_hour_pct "%.0f" "$api_five_pct"
+            iso_to_epoch "$api_five_reset" && five_hour_reset_epoch=$ISO_EPOCH
+            printf -v seven_day_pct "%.0f" "$api_seven_pct"
+            iso_to_epoch "$api_seven_reset" && seven_day_reset_epoch=$ISO_EPOCH
         fi
     fi
 fi
@@ -284,40 +375,45 @@ rate_lines=""
 bar_width=10
 
 if [ -n "$five_hour_pct" ]; then
-    five_hour_reset=$(format_epoch_time "$five_hour_reset_epoch" "time")
-    five_hour_bar=$(build_bar "$five_hour_pct" "$bar_width")
-    five_hour_pct_color=$(color_for_pct "$five_hour_pct")
-    five_hour_pct_fmt=$(printf "%3d" "$five_hour_pct")
+    format_epoch_time "$five_hour_reset_epoch" "time"
+    five_hour_reset=$FMT_TIME
+    build_bar "$five_hour_pct" "$bar_width"
+    printf -v five_hour_pct_fmt "%3d" "$five_hour_pct"
 
-    rate_lines+="${white}current${reset} ${five_hour_bar} ${five_hour_pct_color}${five_hour_pct_fmt}%${reset}"
+    rate_lines+="${white}current${reset} ${BAR} ${COLOR}${five_hour_pct_fmt}%${reset}"
     [ -n "$five_hour_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${five_hour_reset}${reset}"
 fi
 
 if [ -n "$seven_day_pct" ]; then
-    seven_day_reset=$(format_epoch_time "$seven_day_reset_epoch" "datetime")
-    seven_day_bar=$(build_bar "$seven_day_pct" "$bar_width")
-    seven_day_pct_color=$(color_for_pct "$seven_day_pct")
-    seven_day_pct_fmt=$(printf "%3d" "$seven_day_pct")
+    format_epoch_time "$seven_day_reset_epoch" "datetime"
+    seven_day_reset=$FMT_TIME
+    build_bar "$seven_day_pct" "$bar_width"
+    printf -v seven_day_pct_fmt "%3d" "$seven_day_pct"
 
     [ -n "$rate_lines" ] && rate_lines+="\n"
-    rate_lines+="${white}weekly${reset}  ${seven_day_bar} ${seven_day_pct_color}${seven_day_pct_fmt}%${reset}"
+    rate_lines+="${white}weekly${reset}  ${BAR} ${COLOR}${seven_day_pct_fmt}%${reset}"
     [ -n "$seven_day_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${seven_day_reset}${reset}"
 fi
 
-if [ "$extra_enabled" = "true" ] && [ -n "$usage_data" ]; then
-    extra_pct=$(echo "$usage_data" | jq -r '.extra_usage.utilization // 0' | awk '{printf "%.0f", $1}')
-    extra_used=$(echo "$usage_data" | jq -r '.extra_usage.used_credits // 0' | awk '{printf "%.2f", $1/100}')
-    extra_limit=$(echo "$usage_data" | jq -r '.extra_usage.monthly_limit // 0' | awk '{printf "%.2f", $1/100}')
-    extra_bar=$(build_bar "$extra_pct" "$bar_width")
-    extra_pct_color=$(color_for_pct "$extra_pct")
+if [ "$extra_enabled" = "true" ]; then
+    printf -v extra_pct "%.0f" "$api_extra_pct"
+    printf -v extra_used "%.2f" "$api_extra_used"
+    printf -v extra_limit "%.2f" "$api_extra_limit"
+    build_bar "$extra_pct" "$bar_width"
 
-    extra_reset=$(date -v+1m -v1d +"%b %-d" 2>/dev/null | tr '[:upper:]' '[:lower:]')
-    if [ -z "$extra_reset" ]; then
-        extra_reset=$(date -d "$(date +%Y-%m-01) +1 month" +"%b %-d" 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    # The extra-usage budget rolls over on the 1st, so this is always day 1 of
+    # the next month. `date -v+1m -v1d` (BSD) with a nested `date` as the GNU
+    # fallback cost two or three forks to say so; the month name is a lookup.
+    cur_mo=$(date +%m 2>/dev/null)
+    if is_num "$cur_mo"; then
+        extra_reset="${months[$(( 10#$cur_mo % 12 ))]} 1"
+    else
+        extra_reset=""
     fi
 
     [ -n "$rate_lines" ] && rate_lines+="\n"
-    rate_lines+="${white}extra${reset}   ${extra_bar} ${extra_pct_color}\$${extra_used}${dim}/${reset}${white}\$${extra_limit}${reset} ${dim}⟳${reset} ${white}${extra_reset}${reset}"
+    rate_lines+="${white}extra${reset}   ${BAR} ${COLOR}\$${extra_used}${dim}/${reset}${white}\$${extra_limit}${reset}"
+    [ -n "$extra_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${extra_reset}${reset}"
 fi
 
 # ── Output ──────────────────────────────────────────────
