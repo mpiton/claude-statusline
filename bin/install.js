@@ -9,6 +9,13 @@ const SETTINGS_FILE = path.join(CLAUDE_DIR, "settings.json");
 const STATUSLINE_DEST = path.join(CLAUDE_DIR, "statusline.sh");
 const STATUSLINE_SRC = path.resolve(__dirname, "statusline.sh");
 
+// The installed script says which release it came from, so a stale copy is
+// recognisable — by the user reading it, by us when deciding whether the copy
+// is worth redoing, and by anyone reporting a bug against a six-month-old file.
+// npm always ships package.json, whatever "files" says.
+const VERSION = require("../package.json").version;
+const VERSION_LINE = /^# statusline-version: *(.*)$/m;
+
 const blue = "\x1b[38;2;0;153;255m";
 const green = "\x1b[38;2;0;175;80m";
 const red = "\x1b[38;2;255;85;85m";
@@ -66,6 +73,19 @@ function checkDeps() {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+// The repo copy carries `dev`; the installed one carries the release it came
+// from. A source without the marker installs unstamped rather than blowing up
+// in the user's face — test/install.sh is what keeps it there.
+function stampedSource() {
+  const source = fs.readFileSync(STATUSLINE_SRC, "utf-8");
+  return source.replace(VERSION_LINE, `# statusline-version: ${VERSION}`);
+}
+
+function versionOf(script) {
+  const found = script.match(VERSION_LINE);
+  return found && found[1] !== "dev" ? found[1] : null;
 }
 
 function uninstall() {
@@ -139,21 +159,35 @@ function run() {
   }
 
   const backup = STATUSLINE_DEST + ".bak";
-  if (fs.existsSync(STATUSLINE_DEST)) {
-    if (fs.existsSync(backup)) {
-      // A backup already there holds the user's own script from the first
-      // install. Copying over it would replace it with ours, and --uninstall
-      // would hand back the wrong file.
-      log(`Keeping the existing ${dim}statusline.sh.bak${reset}`);
-    } else {
-      fs.copyFileSync(STATUSLINE_DEST, backup);
-      warn(`Backed up existing statusline to ${dim}statusline.sh.bak${reset}`);
-    }
-  }
+  const wanted = stampedSource();
+  const installed = fs.existsSync(STATUSLINE_DEST)
+    ? fs.readFileSync(STATUSLINE_DEST, "utf-8")
+    : null;
 
-  fs.copyFileSync(STATUSLINE_SRC, STATUSLINE_DEST);
-  fs.chmodSync(STATUSLINE_DEST, 0o755);
-  success(`Installed statusline to ${dim}${STATUSLINE_DEST}${reset}`);
+  if (installed === wanted) {
+    success(`Statusline already at ${VERSION}`);
+  } else {
+    // Only a script we did not stamp can be the user's own, and only that is
+    // worth backing up. Copying our own previous release into the backup would
+    // make --uninstall restore an old statusline instead of removing ours.
+    if (installed !== null && versionOf(installed) === null) {
+      if (fs.existsSync(backup)) {
+        log(`Keeping the existing ${dim}statusline.sh.bak${reset}`);
+      } else {
+        fs.copyFileSync(STATUSLINE_DEST, backup);
+        warn(`Backed up existing statusline to ${dim}statusline.sh.bak${reset}`);
+      }
+    }
+
+    fs.writeFileSync(STATUSLINE_DEST, wanted);
+    fs.chmodSync(STATUSLINE_DEST, 0o755);
+    const from = versionOf(installed || "");
+    success(
+      from
+        ? `Updated statusline ${from} → ${VERSION} in ${dim}${STATUSLINE_DEST}${reset}`
+        : `Installed statusline ${VERSION} to ${dim}${STATUSLINE_DEST}${reset}`,
+    );
+  }
 
   let settings = {};
   if (fs.existsSync(SETTINGS_FILE)) {

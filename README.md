@@ -16,6 +16,16 @@ npx @kamranahmedse/claude-statusline
 
 It backups your old status line if any and copies the status line script to `~/.claude/statusline.sh` and configures your Claude Code settings.
 
+The installed copy carries the release it came from on its second line:
+
+```bash
+head -2 ~/.claude/statusline.sh    # => # statusline-version: 1.0.6
+```
+
+Rerun the install command to update it. A copy that is already current is left
+where it is, and an older one of ours is replaced rather than backed up — only
+a statusline you wrote yourself ends up in `statusline.sh.bak`.
+
 ## Requirements
 
 - [jq](https://jqlang.github.io/jq/) — for parsing JSON

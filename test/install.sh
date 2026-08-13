@@ -68,6 +68,12 @@ node_home() {
     if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
 }
 
+# The installer stamps the release it came from into the copy it writes, so the
+# two files differ by that one line and nothing else.
+VERSION=$(node -p "require('$ROOT/package.json').version")
+version_of() { sed -n 's/^# statusline-version: *//p' "$1" | head -1; }
+unstamped() { sed 's/^# statusline-version:.*$/# statusline-version:/' "$1"; }
+
 # Each case gets its own HOME so nothing leaks between them.
 OUT=""; STATUS=0
 install_into() {
@@ -89,8 +95,13 @@ check "it creates ~/.claude/statusline.sh" "yes" \
     "$([ -f "$HOME_A/.claude/statusline.sh" ] && echo yes || echo no)"
 check "the installed script is executable" "yes" \
     "$([ -x "$HOME_A/.claude/statusline.sh" ] && echo yes || echo no)"
-check "the installed script matches the source" "same" \
-    "$(cmp -s "$ROOT/bin/statusline.sh" "$HOME_A/.claude/statusline.sh" && echo same || echo differs)"
+check "the installed script matches the source apart from the stamp" "same" \
+    "$(diff <(unstamped "$ROOT/bin/statusline.sh") <(unstamped "$HOME_A/.claude/statusline.sh") \
+        >/dev/null 2>&1 && echo same || echo differs)"
+check "the installed script carries the package version" "$VERSION" \
+    "$(version_of "$HOME_A/.claude/statusline.sh")"
+check "the packaged source carries an unstamped marker" "dev" \
+    "$(version_of "$ROOT/bin/statusline.sh")"
 # shellcheck disable=SC2016  # $HOME stays literal in the command the installer writes.
 check "it points settings.json at the installed script" 'bash "$HOME/.claude/statusline.sh"' \
     "$(jq -r '.statusLine.command // ""' "$HOME_A/.claude/settings.json" 2>/dev/null)"
@@ -124,6 +135,8 @@ check "unrelated settings keys survive the install" "high opus" \
 install_into "$HOME_B"
 check "a second install is a no-op on settings" "yes" \
     "$(printf '%s' "$OUT" | grep -q "Settings already configured" && echo yes || echo no)"
+check "a second install skips the copy" "yes" \
+    "$(printf '%s' "$OUT" | grep -q "already at $VERSION" && echo yes || echo no)"
 
 HOME_C="$TMP/broken"
 mkdir -p "$HOME_C/.claude"
@@ -132,6 +145,23 @@ install_into "$HOME_C"
 check "an unparseable settings.json aborts instead of clobbering" "1" "$STATUS"
 check "the unparseable file is left alone" "not json" \
     "$(cat "$HOME_C/.claude/settings.json")"
+
+# A script left behind by an older release carries our stamp, so the installer
+# knows it is looking at its own work: overwrite it, and do not squirrel it away
+# as if it were something the user wrote.
+section "version"
+
+HOME_G="$TMP/stale"
+mkdir -p "$HOME_G/.claude"
+sed 's/^# statusline-version:.*$/# statusline-version: 0.0.1/' "$ROOT/bin/statusline.sh" \
+    > "$HOME_G/.claude/statusline.sh"
+install_into "$HOME_G"
+
+check "an older install is replaced" "$VERSION" "$(version_of "$HOME_G/.claude/statusline.sh")"
+check "the upgrade names both versions" "yes" \
+    "$(printf '%s' "$OUT" | grep -q "0.0.1 → $VERSION" && echo yes || echo no)"
+check "our own old script is not backed up as the user's" "gone" \
+    "$([ -e "$HOME_G/.claude/statusline.sh.bak" ] && echo present || echo gone)"
 
 section "dependencies"
 
