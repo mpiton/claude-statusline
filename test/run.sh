@@ -652,7 +652,12 @@ section "locale"
 # Regression: bash printf rejects "42.3" and date drops am/pm under a locale
 # whose decimal separator is a comma, unless the script forces LC_ALL=C.
 COMMA_LOCALE=""
+UTF8_LOCALE=""
 for candidate in $(locale -a 2>/dev/null); do
+    case "$candidate" in
+        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) [ -n "$UTF8_LOCALE" ] || UTF8_LOCALE=$candidate ;;
+        *) continue ;;
+    esac
     if ! LC_ALL="$candidate" printf '%.0f' 42.3 >/dev/null 2>&1; then
         COMMA_LOCALE="$candidate"
         break
@@ -668,6 +673,21 @@ else
 
 $RATES"
     assert_no_stderr "no printf warning under a comma-decimal locale"
+fi
+
+render "$(payload '.effort.level = "high"')" LC_ALL=C
+assert "a non-UTF-8 locale uses ASCII decorations" "Opus 5 | ctx 25% | repo-clean (main) | + high
+
+current ####------  42% reset 7:06am
+weekly  #---------  19% reset aug 10, 10:13pm"
+
+if [ -z "$UTF8_LOCALE" ]; then
+    skip "a UTF-8 locale keeps Unicode decorations" "no UTF-8 locale installed"
+else
+    render "$(payload '.effort.level = "high"')" LC_ALL="$UTF8_LOCALE"
+    assert "a UTF-8 locale keeps Unicode decorations" "Opus 5 │ ✍️ 25% │ repo-clean (main) │ ◕ high
+
+$RATES"
 fi
 
 section "permissions"
