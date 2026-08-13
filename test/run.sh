@@ -328,6 +328,25 @@ assert_color "context over 70% is yellow" $'\033[38;2;230;200;0m75%'
 render "$(payload '.context_window.current_usage.cache_read_input_tokens = 186000')"
 assert_color "context over 90% is red" $'\033[38;2;255;85;85m95%'
 
+section "session metrics"
+
+render "$(payload '.cost = {
+    total_cost_usd: 1.236,
+    total_lines_added: 12,
+    total_lines_removed: 3
+} | .output_style.name = "Explanatory" | .exceeds_200k_tokens = true')"
+assert "renders cost, changed lines, output style and the 200k warning" "Opus 5 │ ✍️ 25% >200k │ repo-clean (main) │ \$1.24 │ +12/-3 │ style:Explanatory
+
+$RATES"
+
+render "$(payload '.cost = {
+    total_cost_usd: 0,
+    total_lines_added: 0,
+    total_lines_removed: 0
+} | .output_style.name = "default"')"
+assert_line1_re "zero cost and the default output style still render" \
+    'repo-clean \(main\) │ \$0\.00 │ style:default$'
+
 section "effort"
 
 # An alternation, not a bracket expression: Git Bash matches bracket sets byte
