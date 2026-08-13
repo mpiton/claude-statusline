@@ -212,6 +212,9 @@ $RATES"
 LEAK="a cached dirty flag does not leak into another directory"
 LEAK2="nor does a cached clean flag"
 CACHED="a cached flag is reused within its own directory"
+EXPIRED="an expired entry is ignored"
+CORRUPT="a corrupt entry is ignored"
+CORRUPT_QUIET="a corrupt entry does not warn"
 DIRTY_CACHE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-dirty-cache"
 rm -f "$DIRTY_CACHE"
 render "$(payload)"
@@ -219,7 +222,7 @@ render "$(payload)"
 if [ ! -f "$DIRTY_CACHE" ]; then
     # No $EPOCHSECONDS means no clock to expire an entry on, so the script
     # never writes one and the whole feature is off. Nothing to seed against.
-    for name in "$LEAK" "$LEAK2" "$CACHED"; do
+    for name in "$LEAK" "$LEAK2" "$CACHED" "$EXPIRED" "$CORRUPT" "$CORRUPT_QUIET"; do
         skip "$name" "no dirty-flag cache before bash 5"
     done
 else
@@ -256,7 +259,7 @@ $RATES"
     # clock without a case having to wait out the real two-second window.
     printf '%s\x1f%s\x1f%s' 1 '*' "$SEEN_CWD" > "$DIRTY_CACHE"
     render "$(payload)"
-    assert "an expired entry is ignored" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+    assert "$EXPIRED" "Opus 5 │ ✍️ 25% │ repo-clean (main)
 
 $RATES"
 
@@ -264,10 +267,10 @@ $RATES"
     # about the garbage it was handed.
     printf '%s\x1f%s\x1f%s' 'nope' '*' "$SEEN_CWD" > "$DIRTY_CACHE"
     render "$(payload)"
-    assert "a corrupt entry is ignored" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+    assert "$CORRUPT" "Opus 5 │ ✍️ 25% │ repo-clean (main)
 
 $RATES"
-    assert_no_stderr "a corrupt entry does not warn"
+    assert_no_stderr "$CORRUPT_QUIET"
 fi
 rm -f "$DIRTY_CACHE"
 
