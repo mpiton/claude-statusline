@@ -209,11 +209,17 @@ fields=$(jq -r '[
     ((.rate_limits.five_hour.used_percentage | numbers) // ""),
     (.rate_limits.five_hour.resets_at // ""),
     ((.rate_limits.seven_day.used_percentage | numbers) // ""),
-    (.rate_limits.seven_day.resets_at // "")
+    (.rate_limits.seven_day.resets_at // ""),
+    ((.cost.total_cost_usd | numbers | select(. >= 0)) // ""),
+    ((.cost.total_lines_added | numbers | floor | select(. >= 0)) // 0),
+    ((.cost.total_lines_removed | numbers | floor | select(. >= 0)) // 0),
+    ((.output_style.name | strings) // ""),
+    (.exceeds_200k_tokens == true)
 ] | map(tostring) | join("\u001f")' <<< "$input" 2>/dev/null)
 
 IFS=$'\x1f' read -r model_name size input_tokens cache_create cache_read \
     effort cwd stdin_five_pct stdin_five_reset stdin_seven_pct stdin_seven_reset \
+    total_cost_usd total_lines_added total_lines_removed output_style exceeds_200k \
     <<< "$fields"
 
 # Malformed stdin leaves every field empty; render the bare fallbacks.
@@ -222,6 +228,8 @@ is_num "$size" || size=200000
 is_num "$input_tokens" || input_tokens=0
 is_num "$cache_create" || cache_create=0
 is_num "$cache_read" || cache_read=0
+is_num "$total_lines_added" || total_lines_added=0
+is_num "$total_lines_removed" || total_lines_removed=0
 
 current=$(( input_tokens + cache_create + cache_read ))
 pct_used=$(( current * 100 / size ))
@@ -325,10 +333,21 @@ esac
 line1="${blue}${model_name}${reset}"
 line1+="${sep}"
 line1+="✍️ ${pct_color}${pct_used}%${reset}"
+[ "$exceeds_200k" = "true" ] && line1+=" ${red}>200k${reset}"
 line1+="${sep}"
 line1+="${skip_perms}${cyan}${dirname}${reset}"
 if [ -n "$git_branch" ]; then
     line1+=" ${green}(${git_branch}${red}${git_dirty}${green})${reset}"
+fi
+if [ -n "$total_cost_usd" ]; then
+    printf -v total_cost_fmt "%.2f" "$total_cost_usd"
+    line1+="${sep}${white}\$${total_cost_fmt}${reset}"
+fi
+if [ "$total_lines_added" -gt 0 ] || [ "$total_lines_removed" -gt 0 ]; then
+    line1+="${sep}${green}+${total_lines_added}${reset}${dim}/${reset}${red}-${total_lines_removed}${reset}"
+fi
+if [ -n "$output_style" ]; then
+    line1+="${sep}${dim}style:${reset}${white}${output_style}${reset}"
 fi
 if [ -n "$effort" ]; then
     line1+="${sep}"
