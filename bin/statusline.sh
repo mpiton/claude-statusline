@@ -174,11 +174,11 @@ cache_writable() {
     cache_readable "$1"
 }
 
-# <path> → true when the file exists and is younger than $cache_max_age. An
-# empty path is the "caching is off" case and is never fresh.
+# <path> [max-age] → true when the file exists and is younger than max-age.
+# An empty path is the "caching is off" case and is never fresh.
 cache_is_fresh() {
     cache_readable "$1" || return 1
-    local mtime now
+    local max_age=${2:-$cache_max_age} mtime now
     if [ "$date_flavor" = gnu ]; then
         mtime=$(stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null)
     else
@@ -187,7 +187,52 @@ cache_is_fresh() {
     is_num "$mtime" || return 1
     now=${EPOCHSECONDS:-}
     [ -n "$now" ] || now=$(date +%s)
-    [ "$(( now - mtime ))" -lt "$cache_max_age" ]
+    [ "$(( now - mtime ))" -lt "$max_age" ]
+}
+
+# Fetches the usage payload into $USAGE_RESPONSE and warms the shared cache.
+# The stdin-rates path runs this in the background; its current render keeps
+# using stdin and the next render gets the extra-usage data written here.
+refresh_usage_cache() {
+    local token="" blob creds_file response
+    USAGE_RESPONSE=""
+
+    if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
+        token="$CLAUDE_CODE_OAUTH_TOKEN"
+    elif command -v security >/dev/null 2>&1; then
+        blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
+        if [ -n "$blob" ]; then
+            token=$(jq -r '.claudeAiOauth.accessToken // empty' <<< "$blob" 2>/dev/null)
+        fi
+    fi
+    if [ -z "$token" ] || [ "$token" = "null" ]; then
+        creds_file="${HOME}/.claude/.credentials.json"
+        if [ -f "$creds_file" ]; then
+            token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
+        fi
+    fi
+    if [ -z "$token" ] || [ "$token" = "null" ]; then
+        if command -v secret-tool >/dev/null 2>&1; then
+            blob=$(timeout 2 secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
+            if [ -n "$blob" ]; then
+                token=$(jq -r '.claudeAiOauth.accessToken // empty' <<< "$blob" 2>/dev/null)
+            fi
+        fi
+    fi
+
+    if [ -n "$token" ] && [ "$token" != "null" ]; then
+        response=$(curl -s --max-time 5 \
+            -H "Accept: application/json" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $token" \
+            -H "anthropic-beta: oauth-2025-04-20" \
+            -H "User-Agent: claude-code/2.1.34" \
+            "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
+        if [ -n "$response" ] && jq -e '.five_hour' <<< "$response" >/dev/null 2>&1; then
+            USAGE_RESPONSE="$response"
+            cache_writable "$cache_file" && printf '%s' "$response" > "$cache_file" 2>/dev/null
+        fi
+    fi
 }
 
 # ── Extract JSON data ───────────────────────────────────
@@ -255,6 +300,7 @@ fi
 # the directory passing does not mean everything inside it came from here.
 cache_dir="${CLAUDE_STATUSLINE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline}"
 cache_max_age=60
+extra_cache_max_age=300
 # `mkdir -p -m` is the case SC2174 warns about — the mode reaches the deepest
 # directory only, and MSYS drops it altogether — so set it separately. Only on
 # a directory this render created: an existing one keeps whatever mode it has.
@@ -392,43 +438,8 @@ if ! $has_stdin_rates; then
     fi
 
     if $needs_refresh; then
-        token=""
-        if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
-            token="$CLAUDE_CODE_OAUTH_TOKEN"
-        elif command -v security >/dev/null 2>&1; then
-            blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
-            if [ -n "$blob" ]; then
-                token=$(jq -r '.claudeAiOauth.accessToken // empty' <<< "$blob" 2>/dev/null)
-            fi
-        fi
-        if [ -z "$token" ] || [ "$token" = "null" ]; then
-            creds_file="${HOME}/.claude/.credentials.json"
-            if [ -f "$creds_file" ]; then
-                token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
-            fi
-        fi
-        if [ -z "$token" ] || [ "$token" = "null" ]; then
-            if command -v secret-tool >/dev/null 2>&1; then
-                blob=$(timeout 2 secret-tool lookup service "Claude Code-credentials" 2>/dev/null)
-                if [ -n "$blob" ]; then
-                    token=$(jq -r '.claudeAiOauth.accessToken // empty' <<< "$blob" 2>/dev/null)
-                fi
-            fi
-        fi
-
-        if [ -n "$token" ] && [ "$token" != "null" ]; then
-            response=$(curl -s --max-time 5 \
-                -H "Accept: application/json" \
-                -H "Content-Type: application/json" \
-                -H "Authorization: Bearer $token" \
-                -H "anthropic-beta: oauth-2025-04-20" \
-                -H "User-Agent: claude-code/2.1.34" \
-                "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
-            if [ -n "$response" ] && jq -e '.five_hour' <<< "$response" >/dev/null 2>&1; then
-                usage_data="$response"
-                cache_writable "$cache_file" && printf '%s' "$response" > "$cache_file" 2>/dev/null
-            fi
-        fi
+        refresh_usage_cache
+        usage_data=$USAGE_RESPONSE
         if [ -z "$usage_data" ] && cache_readable "$cache_file"; then
             # The refresh failed — no token, or the call did not come back. A
             # rate-limit bar that is behind still says something, and the reset
@@ -438,15 +449,12 @@ if ! $has_stdin_rates; then
             usage_stale=true
         fi
     fi
-elif cache_is_fresh "$cache_file"; then
+elif cache_is_fresh "$cache_file" "$extra_cache_max_age"; then
     # stdin already carried the rate limits; the cache is only still worth
     # reading for the extra-usage block, which stdin does not report.
-    #
-    # Nothing on this path ever refreshes the cache, so without the age check
-    # the credit amounts came from whenever the last render that did refresh
-    # happened to run, with nothing bounding how long ago that was. Currency
-    # figures of unknown age read as current, so a stale cache drops the line.
     usage_data=$(<"$cache_file")
+elif cache_writable "$cache_file"; then
+    refresh_usage_cache </dev/null >/dev/null 2>&1 &
 fi
 
 # One jq pass over whichever payload we ended up with. A parse failure leaves

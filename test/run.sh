@@ -449,6 +449,25 @@ render "$(payload)"
 assert_re "extra usage rides alongside rate limits from stdin" \
     'extra   ●●●○○○○○○○ \$12\.34/\$50\.00'
 
+# A cold cache on the stdin-rates path cannot supply extra usage yet, but it
+# should be warmed for the next render without making the current one wait.
+printf '%s' "$EXTRA_BODY" > "$TMP/extra-response.json"
+clear_cache
+render "$(payload)" CLAUDE_CODE_OAUTH_TOKEN=test-token \
+    STUB_CURL_BODY="$TMP/extra-response.json"
+for _ in {1..50}; do
+    [ -f "$CACHE_FILE" ] && jq -e '.extra_usage.is_enabled == true' "$CACHE_FILE" >/dev/null 2>&1 && break
+    sleep 0.02
+done
+selected "stdin rate limits warm a cold extra-usage cache" && {
+    if [ -f "$CACHE_FILE" ] && jq -e '.extra_usage.is_enabled == true' "$CACHE_FILE" >/dev/null 2>&1; then
+        report_pass "stdin rate limits warm a cold extra-usage cache"
+    else
+        report_fail "stdin rate limits warm a cold extra-usage cache" \
+            "cache holds enabled .extra_usage" "$(cat "$CACHE_FILE" 2>&1)"
+    fi
+}
+
 # Nothing on that path ever refreshes the cache, so an unbounded-age read put
 # credit amounts on screen from whenever the last refreshing render happened to
 # run. Currency of unknown age reads as current, so a stale cache drops the
