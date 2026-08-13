@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push supersedes whatever is still running for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Nothing here runs an authenticated git command, and the test
+          # scripts are repo-controlled, so don't leave a token in .git/config
+          # for them to read.
+          persist-credentials: false
+      - run: shellcheck --version
+      - run: shellcheck bin/statusline.sh test/*.sh
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Nothing here runs an authenticated git command, and the test
+          # scripts are repo-controlled, so don't leave a token in .git/config
+          # for them to read.
+          persist-credentials: false
+
+      # statusline.sh branches on BSD vs GNU date/stat, so the two runners
+      # exercise different halves of it. macOS also still ships bash 3.2.
+      - name: Show environment
+        run: |
+          bash --version | head -1
+          jq --version || true
+          node --version
+
+      - name: Install jq
+        if: runner.os == 'macOS'
+        run: command -v jq >/dev/null || brew install jq
+
+      - name: Statusline tests
+        run: bash test/run.sh
+
+      - name: Installer tests
+        run: |
+          node --check bin/install.js
+          bash test/install.sh
+
+  # Git Bash is a third date/stat/ps dialect. Only test/run.sh runs here —
+  # install.js probes its dependencies with `which`, which execSync hands to
+  # cmd.exe on Windows, so the installer cannot work there yet.
+  test-windows:
+    name: test (windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Nothing here runs an authenticated git command, and the test
+          # scripts are repo-controlled, so don't leave a token in .git/config
+          # for them to read.
+          persist-credentials: false
+      - run: bash --version | head -1
+      - run: bash test/run.sh
+
+  package:
+    name: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Nothing here runs an authenticated git command, and the test
+          # scripts are repo-controlled, so don't leave a token in .git/config
+          # for them to read.
+          persist-credentials: false
+
+      # `npm i -g` has to ship the script the installer copies; leaving it out
+      # of package.json "files" would publish a tarball that installs nothing.
+      # npm 12 keys the report by package name where earlier versions used an
+      # array, so walk the tree instead of indexing into it.
+      - name: The tarball carries the statusline
+        run: |
+          npm pack --dry-run --json > "$RUNNER_TEMP/pack.json"
+          jq -e '[.. | objects | .path? // empty]
+                 | (index("bin/statusline.sh") != null)
+                   and (index("bin/install.js") != null)' "$RUNNER_TEMP/pack.json"

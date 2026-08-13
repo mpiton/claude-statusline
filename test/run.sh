@@ -101,6 +101,7 @@ STDOUT=""; LINE1=""; RAW1=""; STDERR=""; STATUS=0
 render() {
     local input="$1" raw; shift
     raw=$(printf '%s' "$input" | env "$@" bash "$STATUSLINE" 2>"$TMP/stderr")
+    # shellcheck disable=SC2034  # part of render()'s output contract, for cases to read.
     STATUS=$?
     STDERR=$(cat "$TMP/stderr")
     RAW1=$(printf '%s' "$raw" | head -1)
@@ -228,9 +229,11 @@ assert_color "context over 90% is red" $'\033[38;2;255;85;85m95%'
 
 section "effort"
 
+# An alternation, not a bracket expression: Git Bash matches bracket sets byte
+# by byte, and each of these glyphs is three bytes.
 for level in low medium high xhigh max; do
     render "$(payload ".effort.level = \"$level\"")"
-    assert_line1_re "effort $level comes from stdin" "│ [◔◑◕●] $level\$"
+    assert_line1_re "effort $level comes from stdin" "│ (◔|◑|◕|●) $level\$"
 done
 
 echo '{"effortLevel":"high"}' > "$HOME/.claude/settings.json"
@@ -292,6 +295,7 @@ assert "a failing API call degrades to no rate lines" "Opus 5 │ ✍️ 25% │
 seed_cache '{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
              "extra_usage":{"is_enabled":true,"utilization":30,"used_credits":1234,"monthly_limit":5000}}'
 render "$(payload 'del(.rate_limits)')"
+# shellcheck disable=SC2016  # `\$` and `$` are regex, not shell expansions.
 assert_re "extra usage renders credits against the monthly limit" \
     'extra   ●●●○○○○○○○ \$12\.34/\$50\.00 ⟳ [a-z]{3} 1$'
 
@@ -330,15 +334,20 @@ section "permissions"
 render "$(payload)"
 assert_line1_re "no bolt without the skip-permissions flag" '│ repo-clean'
 
-selected "bolt shows when the parent ran with --dangerously-skip-permissions" && {
-    name="bolt shows when the parent ran with --dangerously-skip-permissions"
+BOLT="bolt shows when the parent ran with --dangerously-skip-permissions"
+
+# Git Bash ships an MSYS `ps` with no -o flag, so nothing there can read the
+# parent's argv and the bolt never appears.
+if [ -z "$(ps -o args= -p $$ 2>/dev/null)" ]; then
+    skip "$BOLT" "ps -o args= unsupported here"
+elif selected "$BOLT"; then
     out=$(printf '%s' "$(payload)" | bash "$TMP/parent.sh" --dangerously-skip-permissions 2>/dev/null \
         | strip_ansi | head -1)
     case "$out" in
-        *"⚡"*) report_pass "$name" ;;
-        *) report_fail "$name" "contains ⚡" "$(printf '%q' "$out")" ;;
+        *"⚡"*) report_pass "$BOLT" ;;
+        *) report_fail "$BOLT" "contains ⚡" "$(printf '%q' "$out")" ;;
     esac
-}
+fi
 
 # ── Summary ─────────────────────────────────────────────
 

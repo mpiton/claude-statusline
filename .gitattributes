@@ -1,0 +1,4 @@
+# Windows checkouts default to autocrlf=true; a CRLF shebang line makes bash
+# fail with `$'\r': command not found`. Keep every text file LF everywhere.
+* text=auto eol=lf
+*.png binary

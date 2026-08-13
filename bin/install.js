@@ -126,8 +126,15 @@ function run() {
 
   const backup = STATUSLINE_DEST + ".bak";
   if (fs.existsSync(STATUSLINE_DEST)) {
-    fs.copyFileSync(STATUSLINE_DEST, backup);
-    warn(`Backed up existing statusline to ${dim}statusline.sh.bak${reset}`);
+    if (fs.existsSync(backup)) {
+      // A backup already there holds the user's own script from the first
+      // install. Copying over it would replace it with ours, and --uninstall
+      // would hand back the wrong file.
+      log(`Keeping the existing ${dim}statusline.sh.bak${reset}`);
+    } else {
+      fs.copyFileSync(STATUSLINE_DEST, backup);
+      warn(`Backed up existing statusline to ${dim}statusline.sh.bak${reset}`);
+    }
   }
 
   fs.copyFileSync(STATUSLINE_SRC, STATUSLINE_DEST);
