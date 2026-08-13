@@ -1,0 +1,354 @@
+#!/bin/bash
+# Tests for bin/statusline.sh — feed a statusline JSON payload on stdin, compare
+# the rendered output against an expectation.
+#
+#   test/run.sh              run everything
+#   test/run.sh locale       run cases whose name contains "locale"
+#
+# Determinism: TZ is pinned to UTC, HOME points at a sandbox, the usage cache
+# lives in a temp dir, and curl/secret-tool/security are stubbed out on PATH so
+# no case can reach the network or the real keychain.
+
+set -u
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+STATUSLINE="$ROOT/bin/statusline.sh"
+FILTER="${1:-}"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+export TZ=UTC
+unset CLAUDE_CODE_OAUTH_TOKEN GIT_DIR GIT_WORK_TREE
+export GIT_CEILING_DIRECTORIES="$TMP"
+
+green='\033[32m'; red='\033[31m'; yellow='\033[33m'; dim='\033[2m'; reset='\033[0m'
+passed=0; failed=0; skipped=0
+
+# ── Sandbox ─────────────────────────────────────────────
+
+# Stubs shadow the real binaries so the API fallback can never hit the network.
+# curl prints $STUB_CURL_BODY when a case sets it, otherwise fails like a timeout.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/curl" <<'EOF'
+#!/bin/bash
+if [ -n "${STUB_CURL_BODY:-}" ] && [ -f "$STUB_CURL_BODY" ]; then
+    cat "$STUB_CURL_BODY"
+    exit 0
+fi
+exit 7
+EOF
+for stub in secret-tool security; do
+    printf '#!/bin/bash\nexit 1\n' > "$TMP/bin/$stub"
+done
+chmod +x "$TMP/bin"/*
+export PATH="$TMP/bin:$PATH"
+
+export HOME="$TMP/home"
+mkdir -p "$HOME/.claude"
+echo '{}' > "$HOME/.claude/settings.json"
+
+export CLAUDE_STATUSLINE_CACHE_DIR="$TMP/cache"
+mkdir -p "$CLAUDE_STATUSLINE_CACHE_DIR"
+CACHE_FILE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-usage-cache.json"
+
+REPO_CLEAN="$TMP/repo-clean"
+REPO_DIRTY="$TMP/repo-dirty"
+PLAIN_DIR="$TMP/plain"
+mkdir -p "$PLAIN_DIR"
+for repo in "$REPO_CLEAN" "$REPO_DIRTY"; do
+    git init -q "$repo"
+    git -C "$repo" symbolic-ref HEAD refs/heads/main
+done
+touch "$REPO_DIRTY/untracked.txt"
+
+# A parent process whose argv carries the flag, so the ⚡ detection has something
+# to find in `ps -o args= -p $PPID`.
+cat > "$TMP/parent.sh" <<EOF
+#!/bin/bash
+bash "$STATUSLINE"
+EOF
+
+# ── Harness ─────────────────────────────────────────────
+
+# Base payload; the argument is a jq expression applied on top of it.
+payload() {
+    jq -cn --arg cwd "$REPO_CLEAN" '{
+        model: {display_name: "Opus 5"},
+        cwd: $cwd,
+        context_window: {
+            context_window_size: 200000,
+            current_usage: {
+                input_tokens: 1000,
+                output_tokens: 500,
+                cache_creation_input_tokens: 3000,
+                cache_read_input_tokens: 46000
+            }
+        },
+        rate_limits: {
+            five_hour: {used_percentage: 42.3, resets_at: 1786000000},
+            seven_day: {used_percentage: 18.7, resets_at: 1786400000}
+        }
+    }' | jq -c "${1:-.}"
+}
+
+strip_ansi() { sed $'s/\033\\[[0-9;]*m//g'; }
+
+STDOUT=""; LINE1=""; RAW1=""; STDERR=""; STATUS=0
+# Renders a payload. Leaves the ANSI-stripped output in $STDOUT, its first line
+# in $LINE1, that same line with colors intact in $RAW1, stderr in $STDERR and
+# the exit code in $STATUS. Extra args are `env` assignments for the run.
+render() {
+    local input="$1" raw; shift
+    raw=$(printf '%s' "$input" | env "$@" bash "$STATUSLINE" 2>"$TMP/stderr")
+    STATUS=$?
+    STDERR=$(cat "$TMP/stderr")
+    RAW1=$(printf '%s' "$raw" | head -1)
+    STDOUT=$(printf '%s' "$raw" | strip_ansi)
+    LINE1=$(printf '%s' "$STDOUT" | head -1)
+}
+
+report_fail() {
+    printf "  ${red}✗${reset} %s\n" "$1"
+    printf "    ${dim}expected:${reset} %s\n" "$2"
+    printf "    ${dim}actual:  ${reset} %s\n" "$3"
+    [ -n "$STDERR" ] && printf "    ${dim}stderr:  ${reset} %s\n" "$STDERR"
+    failed=$((failed + 1))
+}
+
+report_pass() {
+    printf "  ${green}✓${reset} %s\n" "$1"
+    passed=$((passed + 1))
+}
+
+selected() {
+    [ -z "$FILTER" ] && return 0
+    case "$1" in *"$FILTER"*) return 0 ;; *) return 1 ;; esac
+}
+
+skip() {
+    selected "$1" || return 0
+    printf "  ${yellow}−${reset} %s ${dim}(%s)${reset}\n" "$1" "$2"
+    skipped=$((skipped + 1))
+}
+
+# assert <name> <expected> — exact match against the whole stripped output.
+assert() {
+    selected "$1" || return 0
+    if [ "$STDOUT" = "$2" ]; then report_pass "$1"; else report_fail "$1" "$(printf '%q' "$2")" "$(printf '%q' "$STDOUT")"; fi
+}
+
+# assert_re <name> <regex> — for output holding a value that moves with the
+# calendar or the terminal.
+assert_re() {
+    selected "$1" || return 0
+    if [[ "$STDOUT" =~ $2 ]]; then report_pass "$1"; else report_fail "$1" "=~ $2" "$(printf '%q' "$STDOUT")"; fi
+}
+
+# Line-1 variants. `$` in a bash regex anchors the end of the whole string, so
+# matching a trailing segment of the first line needs that line on its own.
+assert_line1_re() {
+    selected "$1" || return 0
+    if [[ "$LINE1" =~ $2 ]]; then report_pass "$1"; else report_fail "$1" "=~ $2" "$(printf '%q' "$LINE1")"; fi
+}
+
+# assert_color <name> <ansi-prefixed-text> — colors survive ANSI stripping only
+# here, where the escape itself is the thing under test.
+assert_color() {
+    selected "$1" || return 0
+    case "$RAW1" in
+        *"$2"*) report_pass "$1" ;;
+        *) report_fail "$1" "contains $(printf '%q' "$2")" "$(printf '%q' "$RAW1")" ;;
+    esac
+}
+
+assert_no_stderr() {
+    selected "$1" || return 0
+    if [ -z "$STDERR" ]; then report_pass "$1"; else report_fail "$1" "(empty stderr)" "$(printf '%q' "$STDERR")"; fi
+}
+
+# Headers would sit above nothing once a filter drops their cases, so a filtered
+# run prints a flat list instead.
+section() { [ -n "$FILTER" ] || printf "\n${dim}%s${reset}\n" "$1"; }
+
+# Renders share one cache; seed or clear it explicitly per case.
+seed_cache() { printf '%s' "$1" > "$CACHE_FILE"; }
+clear_cache() { rm -f "$CACHE_FILE"; }
+
+RATES_5H="current ●●●●○○○○○○  42% ⟳ 7:06am"
+RATES_7D="weekly  ●○○○○○○○○○  19% ⟳ aug 10, 10:13pm"
+RATES="$RATES_5H
+$RATES_7D"
+
+# ── Cases ───────────────────────────────────────────────
+
+section "input"
+
+render ""
+assert "empty stdin falls back to a bare name" "Claude"
+
+clear_cache
+render "$(payload)"
+assert "renders model, context, repo and rate limits" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
+render "$(payload '.cwd = "'"$PLAIN_DIR"'"')"
+assert "no git segment outside a repo" "Opus 5 │ ✍️ 25% │ plain
+
+$RATES"
+
+render "$(payload '.cwd = "'"$REPO_DIRTY"'"')"
+assert "dirty worktree gets a star" "Opus 5 │ ✍️ 25% │ repo-dirty (main*)
+
+$RATES"
+
+render "$(payload 'del(.model)')"
+assert_line1_re "missing model falls back to Claude" '^Claude │'
+
+section "context window"
+
+render "$(payload '.context_window.current_usage.cache_read_input_tokens = 196000')"
+assert_line1_re "context percentage tracks token usage" '✍️ 100%'
+
+render "$(payload '.context_window.context_window_size = 0')"
+assert_line1_re "zero window size falls back to 200k" '✍️ 25%'
+
+render "$(payload '.context_window.current_usage.cache_read_input_tokens = 46000')"
+assert_color "context under 50% is green" $'\033[38;2;0;175;80m25%'
+
+render "$(payload '.context_window.current_usage.cache_read_input_tokens = 116000')"
+assert_color "context over 50% is orange" $'\033[38;2;255;176;85m60%'
+
+render "$(payload '.context_window.current_usage.cache_read_input_tokens = 146000')"
+assert_color "context over 70% is yellow" $'\033[38;2;230;200;0m75%'
+
+render "$(payload '.context_window.current_usage.cache_read_input_tokens = 186000')"
+assert_color "context over 90% is red" $'\033[38;2;255;85;85m95%'
+
+section "effort"
+
+for level in low medium high xhigh max; do
+    render "$(payload ".effort.level = \"$level\"")"
+    assert_line1_re "effort $level comes from stdin" "│ [◔◑◕●] $level\$"
+done
+
+echo '{"effortLevel":"high"}' > "$HOME/.claude/settings.json"
+render "$(payload)"
+assert_line1_re "effort falls back to settings.json when stdin omits it" '│ ◕ high$'
+
+render "$(payload '.effort.level = "low"')"
+assert_line1_re "stdin effort wins over settings.json" '│ ◔ low$'
+
+echo '{}' > "$HOME/.claude/settings.json"
+render "$(payload)"
+assert_line1_re "effort segment is dropped when no source has one" 'repo-clean \(main\)$'
+
+section "rate limits from stdin"
+
+render "$(payload 'del(.rate_limits)')"
+assert "no rate limits and no cache means no extra lines" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
+
+render "$(payload '.rate_limits.five_hour.used_percentage = 87.6 | del(.rate_limits.seven_day)')"
+assert "seven-day line is skipped when absent" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+current ●●●●●●●●○○  88% ⟳ 7:06am"
+
+render "$(payload '.rate_limits.five_hour.used_percentage = 42.3')"
+assert_no_stderr "fractional percentages do not warn"
+
+section "rate limits from the API cache"
+
+API_BODY='{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
+           "seven_day":{"utilization":18.7,"resets_at":"2026-08-10T22:13:20Z"},
+           "extra_usage":{"is_enabled":false}}'
+
+seed_cache "$API_BODY"
+render "$(payload 'del(.rate_limits)')"
+assert "a fresh cache supplies rate limits with ISO reset times" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
+printf '%s' "$API_BODY" > "$TMP/api-response.json"
+clear_cache
+render "$(payload 'del(.rate_limits)')" \
+    CLAUDE_CODE_OAUTH_TOKEN=test-token STUB_CURL_BODY="$TMP/api-response.json"
+assert "a cold cache fetches from the API" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
+selected "the fetched response is written to the cache" && {
+    if [ -f "$CACHE_FILE" ] && jq -e '.five_hour' "$CACHE_FILE" >/dev/null 2>&1; then
+        report_pass "the fetched response is written to the cache"
+    else
+        report_fail "the fetched response is written to the cache" "cache holds .five_hour" "$(cat "$CACHE_FILE" 2>&1)"
+    fi
+}
+
+clear_cache
+render "$(payload 'del(.rate_limits)')" CLAUDE_CODE_OAUTH_TOKEN=test-token
+assert "a failing API call degrades to no rate lines" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
+
+seed_cache '{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
+             "extra_usage":{"is_enabled":true,"utilization":30,"used_credits":1234,"monthly_limit":5000}}'
+render "$(payload 'del(.rate_limits)')"
+assert_re "extra usage renders credits against the monthly limit" \
+    'extra   ●●●○○○○○○○ \$12\.34/\$50\.00 ⟳ [a-z]{3} 1$'
+
+seed_cache 'not json at all'
+render "$(payload)"
+assert "a corrupt cache does not break the render" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+clear_cache
+
+section "locale"
+
+# Regression: bash printf rejects "42.3" and date drops am/pm under a locale
+# whose decimal separator is a comma, unless the script forces LC_ALL=C.
+COMMA_LOCALE=""
+for candidate in $(locale -a 2>/dev/null); do
+    if ! LC_ALL="$candidate" printf '%.0f' 42.3 >/dev/null 2>&1; then
+        COMMA_LOCALE="$candidate"
+        break
+    fi
+done
+
+if [ -z "$COMMA_LOCALE" ]; then
+    skip "renders identically under a comma-decimal locale" "no comma-decimal locale installed"
+    skip "no printf warning under a comma-decimal locale" "no comma-decimal locale installed"
+else
+    render "$(payload)" LC_ALL="$COMMA_LOCALE"
+    assert "renders identically under a comma-decimal locale" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+    assert_no_stderr "no printf warning under a comma-decimal locale"
+fi
+
+section "permissions"
+
+render "$(payload)"
+assert_line1_re "no bolt without the skip-permissions flag" '│ repo-clean'
+
+selected "bolt shows when the parent ran with --dangerously-skip-permissions" && {
+    name="bolt shows when the parent ran with --dangerously-skip-permissions"
+    out=$(printf '%s' "$(payload)" | bash "$TMP/parent.sh" --dangerously-skip-permissions 2>/dev/null \
+        | strip_ansi | head -1)
+    case "$out" in
+        *"⚡"*) report_pass "$name" ;;
+        *) report_fail "$name" "contains ⚡" "$(printf '%q' "$out")" ;;
+    esac
+}
+
+# ── Summary ─────────────────────────────────────────────
+
+printf "\n"
+if [ "$failed" -gt 0 ]; then
+    printf "  ${red}%d failed${reset}, %d passed" "$failed" "$passed"
+else
+    printf "  ${green}%d passed${reset}" "$passed"
+fi
+[ "$skipped" -gt 0 ] && printf ", ${yellow}%d skipped${reset}" "$skipped"
+printf "\n\n"
+
+[ "$failed" -eq 0 ]

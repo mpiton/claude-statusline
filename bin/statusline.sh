@@ -1,6 +1,10 @@
 #!/bin/bash
 set -f
 
+# Force C locale: `printf %.0f` rejects "42.3" when LC_NUMERIC uses a comma,
+# and `date` emits localized month names with no am/pm designator.
+export LC_ALL=C
+
 input=$(cat)
 
 if [ -z "$input" ]; then
@@ -124,16 +128,17 @@ else
     pct_used=0
 fi
 
-settings_path="$HOME/.claude/settings.json"
-effort=$(echo "$input" | jq -r '.effort.level // empty' 2>/dev/null)
-if [ -z "$effort" ] && [ -f "$settings_path" ]; then
-    effort=$(jq -r '.effortLevel // "default"' "$settings_path" 2>/dev/null)
-fi
-if [ -z "$effort" ] || [ "$effort" = "null" ]; then
-    effort="default"
+# Live session effort comes from stdin and follows /effort. settings.json is a
+# fallback for CLI versions that don't emit `.effort`, and goes stale otherwise.
+effort=$(echo "$input" | jq -r '.effort.level // empty')
+if [ -z "$effort" ]; then
+    settings_path="$HOME/.claude/settings.json"
+    if [ -f "$settings_path" ]; then
+        effort=$(jq -r '.effortLevel // empty' "$settings_path" 2>/dev/null)
+    fi
 fi
 
-# ── LINE 1: Model │ Context % │ Directory (branch) │ Session │ Effort ──
+# ── LINE 1: Model │ Context % │ Directory (branch) │ Effort ──
 pct_color=$(color_for_pct "$pct_used")
 cwd=$(echo "$input" | jq -r '.cwd // ""')
 [ -z "$cwd" ] || [ "$cwd" = "null" ] && cwd=$(pwd)
@@ -145,23 +150,6 @@ if git -C "$cwd" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
     if [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)" ]; then
         git_dirty="*"
-    fi
-fi
-
-session_duration=""
-session_start=$(echo "$input" | jq -r '.session.start_time // empty')
-if [ -n "$session_start" ] && [ "$session_start" != "null" ]; then
-    start_epoch=$(iso_to_epoch "$session_start")
-    if [ -n "$start_epoch" ]; then
-        now_epoch=$(date +%s)
-        elapsed=$(( now_epoch - start_epoch ))
-        if [ "$elapsed" -ge 3600 ]; then
-            session_duration="$(( elapsed / 3600 ))h$(( (elapsed % 3600) / 60 ))m"
-        elif [ "$elapsed" -ge 60 ]; then
-            session_duration="$(( elapsed / 60 ))m"
-        else
-            session_duration="${elapsed}s"
-        fi
     fi
 fi
 
@@ -179,19 +167,17 @@ line1+="${skip_perms}${cyan}${dirname}${reset}"
 if [ -n "$git_branch" ]; then
     line1+=" ${green}(${git_branch}${red}${git_dirty}${green})${reset}"
 fi
-if [ -n "$session_duration" ]; then
+if [ -n "$effort" ]; then
     line1+="${sep}"
-    line1+="${dim}⏱ ${reset}${white}${session_duration}${reset}"
+    case "$effort" in
+        max)    line1+="${orange}● ${effort}${reset}" ;;
+        xhigh)  line1+="${magenta}● ${effort}${reset}" ;;
+        high)   line1+="${magenta}◕ ${effort}${reset}" ;;
+        medium) line1+="${dim}◑ ${effort}${reset}" ;;
+        low)    line1+="${dim}◔ ${effort}${reset}" ;;
+        *)      line1+="${dim}◑ ${effort}${reset}" ;;
+    esac
 fi
-line1+="${sep}"
-case "$effort" in
-    max)    line1+="${magenta}● ${effort}${reset}" ;;
-    xhigh)  line1+="${magenta}● ${effort}${reset}" ;;
-    high)   line1+="${magenta}● ${effort}${reset}" ;;
-    medium) line1+="${dim}◑ ${effort}${reset}" ;;
-    low)    line1+="${dim}◔ ${effort}${reset}" ;;
-    *)      line1+="${dim}◑ ${effort}${reset}" ;;
-esac
 
 # ── Rate limits from stdin (primary) ───────────────────
 has_stdin_rates=false
@@ -210,9 +196,10 @@ if [ -n "$stdin_five_pct" ]; then
 fi
 
 # ── Fallback: API call (cached) ────────────────────────
-cache_file="/tmp/claude/statusline-usage-cache.json"
+cache_dir="${CLAUDE_STATUSLINE_CACHE_DIR:-/tmp/claude}"
+cache_file="$cache_dir/statusline-usage-cache.json"
 cache_max_age=60
-mkdir -p /tmp/claude
+mkdir -p "$cache_dir"
 
 usage_data=""
 extra_enabled="false"

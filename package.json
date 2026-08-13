@@ -5,8 +5,12 @@
   "bin": {
     "claude-statusline": "./bin/install.js"
   },
+  "files": [
+    "bin",
+    ".github"
+  ],
   "scripts": {
-    "test": "bash test/statusline.test.sh"
+    "test": "bash test/run.sh && bash test/statusline.test.sh"
   },
   "keywords": [
     "claude",
