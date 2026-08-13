@@ -7,10 +7,13 @@
   },
   "files": [
     "bin",
-    ".github"
+    ".github/demo.png"
   ],
   "scripts": {
-    "test": "bash test/run.sh && bash test/statusline.test.sh"
+    "test": "bash test/run.sh && bash test/install.sh",
+    "test:statusline": "bash test/run.sh",
+    "test:install": "bash test/install.sh",
+    "lint": "shellcheck bin/statusline.sh test/*.sh"
   },
   "keywords": [
     "claude",
