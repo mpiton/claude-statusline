@@ -224,8 +224,12 @@ fi
 # empty paths make that fail closed.
 cache_dir="${CLAUDE_STATUSLINE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline}"
 cache_max_age=60
-# shellcheck disable=SC2174  # deepest-only is the point: ~/.cache keeps its own mode.
-[ -d "$cache_dir" ] || mkdir -p -m 700 "$cache_dir" 2>/dev/null
+# `mkdir -p -m` is the case SC2174 warns about — the mode reaches the deepest
+# directory only, and MSYS drops it altogether — so set it separately. Only on
+# a directory this render created: an existing one keeps whatever mode it has.
+if [ ! -d "$cache_dir" ]; then
+    mkdir -p "$cache_dir" 2>/dev/null && chmod 700 "$cache_dir" 2>/dev/null
+fi
 if [ -d "$cache_dir" ] && [ ! -L "$cache_dir" ] && [ -O "$cache_dir" ]; then
     cache_file="$cache_dir/statusline-usage-cache.json"
     dirty_cache="$cache_dir/statusline-dirty-cache"

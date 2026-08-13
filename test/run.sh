@@ -468,9 +468,12 @@ LINK_TARGET="$TMP/link-target"
 mkdir -p "$LINK_TARGET"
 printf '%s' "$API_BODY" > "$LINK_TARGET/statusline-usage-cache.json"
 SYMLINKED="a symlinked cache directory is refused"
-# `ln -s` on Git Bash copies instead of linking unless MSYS is configured for
-# native symlinks, so having run it is not proof there is a link to refuse.
-if ln -s "$LINK_TARGET" "$TMP/link" 2>/dev/null && [ -L "$TMP/link" ]; then
+# Git Bash makes something `ln -s` calls a link and `-L` agrees with, which a
+# child handed the path through the environment no longer sees as one. Probe
+# under the conditions the render runs in rather than the ones here.
+# shellcheck disable=SC2016  # $L expands in the child, which is the whole point.
+sees_symlink() { [ "$(env L="$1" bash -c '[ -L "$L" ] && echo yes')" = yes ]; }
+if ln -s "$LINK_TARGET" "$TMP/link" 2>/dev/null && sees_symlink "$TMP/link"; then
     render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR="$TMP/link"
     assert "$SYMLINKED" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
 else
