@@ -101,6 +101,7 @@ STDOUT=""; LINE1=""; RAW1=""; STDERR=""; STATUS=0
 render() {
     local input="$1" raw; shift
     raw=$(printf '%s' "$input" | env "$@" bash "$STATUSLINE" 2>"$TMP/stderr")
+    # shellcheck disable=SC2034  # part of render()'s output contract, for cases to read.
     STATUS=$?
     STDERR=$(cat "$TMP/stderr")
     RAW1=$(printf '%s' "$raw" | head -1)
@@ -292,6 +293,7 @@ assert "a failing API call degrades to no rate lines" "Opus 5 │ ✍️ 25% │
 seed_cache '{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
              "extra_usage":{"is_enabled":true,"utilization":30,"used_credits":1234,"monthly_limit":5000}}'
 render "$(payload 'del(.rate_limits)')"
+# shellcheck disable=SC2016  # `\$` and `$` are regex, not shell expansions.
 assert_re "extra usage renders credits against the monthly limit" \
     'extra   ●●●○○○○○○○ \$12\.34/\$50\.00 ⟳ [a-z]{3} 1$'
 
