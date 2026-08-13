@@ -75,7 +75,7 @@ VERSION=$(jq -r .version "$ROOT/package.json")
 # An empty version turns every check below into a substring match against
 # anything, which is how a broken lookup passed CI once already.
 [ -n "$VERSION" ] || {
-    printf "  ${red}✗${reset} could not read the version out of package.json\n\n"
+    printf "  ${red}✗${reset} %s\n\n" "could not read the version out of package.json"
     exit 1
 }
 version_of() { sed -n 's/^# statusline-version: *//p' "$1" | head -1; }
