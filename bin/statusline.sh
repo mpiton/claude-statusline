@@ -196,9 +196,10 @@ if [ -n "$stdin_five_pct" ]; then
 fi
 
 # ── Fallback: API call (cached) ────────────────────────
-cache_file="/tmp/claude/statusline-usage-cache.json"
+cache_dir="${CLAUDE_STATUSLINE_CACHE_DIR:-/tmp/claude}"
+cache_file="$cache_dir/statusline-usage-cache.json"
 cache_max_age=60
-mkdir -p /tmp/claude
+mkdir -p "$cache_dir"
 
 usage_data=""
 extra_enabled="false"

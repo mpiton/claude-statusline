@@ -26,6 +26,15 @@ On macOS:
 brew install jq
 ```
 
+## Tests
+
+```bash
+npm test              # everything
+npm test -- effort    # only cases whose name contains "effort"
+```
+
+Each case pipes a statusline JSON payload into `bin/statusline.sh` and checks what it renders. The run is sandboxed — `TZ` is pinned to UTC, `HOME` and the usage cache point at a temp dir, and `curl` is stubbed — so nothing touches the network or your real config. Cases that need a comma-decimal locale are skipped if none is installed.
+
 ## Uninstall
 
 ```bash
