@@ -55,11 +55,18 @@ check() {
 
 section() { [ -n "$FILTER" ] || printf "\n${dim}%s${reset}\n" "$1"; }
 
+# node on Windows reads USERPROFILE rather than HOME, and cannot follow the
+# MSYS paths this script builds, so hand it the Windows spelling of the same
+# directory. Elsewhere USERPROFILE is ignored and this is the path itself.
+node_home() {
+    if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s' "$1"; fi
+}
+
 # Each case gets its own HOME so nothing leaks between them.
 OUT=""; STATUS=0
 install_into() {
     local home="$1"; shift
-    OUT=$(HOME="$home" node "$INSTALLER" "$@" 2>&1)
+    OUT=$(HOME="$home" USERPROFILE="$(node_home "$home")" node "$INSTALLER" "$@" 2>&1)
     STATUS=$?
 }
 
@@ -122,17 +129,37 @@ check "the unparseable file is left alone" "not json" \
 
 section "dependencies"
 
-# An empty PATH makes the installer's `which jq|curl|git` probes fail, which is
-# the closest we get to a machine without them. node itself has to be invoked by
-# absolute path, since the empty PATH hides it too.
+# An empty PATH hides jq, curl and git — and bash, which the installer probes
+# through — which is the closest we get to a machine without them. node itself
+# has to be invoked by absolute path, since the empty PATH hides it too.
 selected "a missing dependency stops the install" && {
     mkdir -p "$TMP/nodeps" "$TMP/emptybin"
-    out=$(HOME="$TMP/nodeps" PATH="$TMP/emptybin" "$(command -v node)" "$INSTALLER" 2>&1)
+    out=$(HOME="$TMP/nodeps" USERPROFILE="$(node_home "$TMP/nodeps")" PATH="$TMP/emptybin" \
+        "$(command -v node)" "$INSTALLER" 2>&1)
     status=$?
     if [ "$status" -eq 1 ] && printf '%s' "$out" | grep -q "Missing required dependencies"; then
         report_pass "a missing dependency stops the install"
     else
         report_fail "a missing dependency stops the install" "exit 1 + missing-deps message" \
+            "exit $status: $(printf '%q' "$out")"
+    fi
+}
+
+# The probe was `which jq`, and execSync hands that to cmd.exe on Windows, which
+# has no `which` — so every Windows install stopped at "Missing required
+# dependencies" with all three tools installed. A `which` that fails reproduces
+# it on any platform.
+selected "the dependency probe does not go through which" && {
+    mkdir -p "$TMP/nowhich" "$TMP/nowhich-home"
+    printf '#!/bin/bash\nexit 127\n' > "$TMP/nowhich/which"
+    chmod +x "$TMP/nowhich/which"
+    out=$(HOME="$TMP/nowhich-home" USERPROFILE="$(node_home "$TMP/nowhich-home")" \
+        PATH="$TMP/nowhich:$PATH" node "$INSTALLER" 2>&1)
+    status=$?
+    if [ "$status" -eq 0 ] && [ -f "$TMP/nowhich-home/.claude/statusline.sh" ]; then
+        report_pass "the dependency probe does not go through which"
+    else
+        report_fail "the dependency probe does not go through which" "exit 0 + installed script" \
             "exit $status: $(printf '%q' "$out")"
     fi
 }
