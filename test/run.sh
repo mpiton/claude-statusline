@@ -32,6 +32,9 @@ passed=0; failed=0; skipped=0
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/bin/bash
+while [ -n "${STUB_CURL_GATE:-}" ] && [ ! -f "$STUB_CURL_GATE" ]; do
+    sleep 0.02
+done
 if [ -n "${STUB_CURL_BODY:-}" ] && [ -f "$STUB_CURL_BODY" ]; then
     cat "$STUB_CURL_BODY"
     exit 0
@@ -49,7 +52,7 @@ mkdir -p "$HOME/.claude"
 echo '{}' > "$HOME/.claude/settings.json"
 
 export CLAUDE_STATUSLINE_CACHE_DIR="$TMP/cache"
-mkdir -p "$CLAUDE_STATUSLINE_CACHE_DIR"
+mkdir -m 700 "$CLAUDE_STATUSLINE_CACHE_DIR"
 CACHE_FILE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-usage-cache.json"
 
 REPO_CLEAN="$TMP/repo-clean"
@@ -451,22 +454,44 @@ assert_re "extra usage rides alongside rate limits from stdin" \
 
 # A cold cache on the stdin-rates path cannot supply extra usage yet, but it
 # should be warmed for the next render without making the current one wait.
-printf '%s' "$EXTRA_BODY" > "$TMP/extra-response.json"
-clear_cache
-render "$(payload)" CLAUDE_CODE_OAUTH_TOKEN=test-token \
-    STUB_CURL_BODY="$TMP/extra-response.json"
-for _ in {1..50}; do
-    [ -f "$CACHE_FILE" ] && jq -e '.extra_usage.is_enabled == true' "$CACHE_FILE" >/dev/null 2>&1 && break
-    sleep 0.02
-done
-selected "stdin rate limits warm a cold extra-usage cache" && {
-    if [ -f "$CACHE_FILE" ] && jq -e '.extra_usage.is_enabled == true' "$CACHE_FILE" >/dev/null 2>&1; then
-        report_pass "stdin rate limits warm a cold extra-usage cache"
+ASYNC_CACHE="stdin rate limits warm a cold extra-usage cache"
+if selected "$ASYNC_CACHE"; then
+    printf '%s' "$EXTRA_BODY" > "$TMP/extra-response.json"
+    clear_cache
+    (
+        render "$(payload)" CLAUDE_CODE_OAUTH_TOKEN=test-token \
+            STUB_CURL_BODY="$TMP/extra-response.json" STUB_CURL_GATE="$TMP/curl-release"
+        printf '%s' "$STDOUT" > "$TMP/async-render-output"
+        : > "$TMP/render-done"
+    ) &
+    render_pid=$!
+
+    for _ in {1..100}; do
+        [ -f "$TMP/render-done" ] && break
+        sleep 0.02
+    done
+    render_finished=false
+    [ -f "$TMP/render-done" ] && render_finished=true
+    : > "$TMP/curl-release"
+    wait "$render_pid"
+
+    for _ in {1..250}; do
+        [ -f "$CACHE_FILE" ] && jq -e '.extra_usage.is_enabled == true' "$CACHE_FILE" >/dev/null 2>&1 && break
+        sleep 0.02
+    done
+    async_output=$(<"$TMP/async-render-output")
+    expected_async="Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+    if $render_finished && [ "$async_output" = "$expected_async" ] &&
+       [ -f "$CACHE_FILE" ] && jq -e '.extra_usage.is_enabled == true' "$CACHE_FILE" >/dev/null 2>&1; then
+        report_pass "$ASYNC_CACHE"
     else
-        report_fail "stdin rate limits warm a cold extra-usage cache" \
-            "cache holds enabled .extra_usage" "$(cat "$CACHE_FILE" 2>&1)"
+        report_fail "$ASYNC_CACHE" \
+            "render finishes with stdin rates before release, then cache warms" \
+            "finished=$render_finished output=$(printf '%q' "$async_output") cache=$(cat "$CACHE_FILE" 2>&1)"
     fi
-}
+fi
 
 # Nothing on that path ever refreshes the cache, so an unbounded-age read put
 # credit amounts on screen from whenever the last refreshing render happened to
@@ -518,6 +543,18 @@ if [ "$(dir_mode "$TMP/mode-probe")" = 700 ]; then
     assert_mode "$PRIVATE" "$DEFAULT_CACHE_DIR" 700
 else
     skip "$PRIVATE" "no POSIX modes on this filesystem"
+fi
+
+NONPRIVATE="a non-private cache directory is refused"
+NONPRIVATE_DIR="$TMP/nonprivate"
+mkdir -m 700 "$NONPRIVATE_DIR"
+chmod 777 "$NONPRIVATE_DIR"
+if [ "$(dir_mode "$NONPRIVATE_DIR")" = 777 ]; then
+    printf '%s' "$API_BODY" > "$NONPRIVATE_DIR/statusline-usage-cache.json"
+    render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR="$NONPRIVATE_DIR"
+    assert "$NONPRIVATE" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
+else
+    skip "$NONPRIVATE" "no POSIX modes on this filesystem"
 fi
 
 rm -rf "$TMP/xdg"
@@ -572,7 +609,7 @@ PLANTED_LINK="a symlinked cache file is not read"
 PLANTED_WRITE="nor written through"
 PLANTED_DIR="$TMP/planted"
 PLANTED_TARGET="$TMP/planted-target.json"
-mkdir -p "$PLANTED_DIR"
+mkdir -m 700 "$PLANTED_DIR"
 printf '%s' "$API_BODY" > "$PLANTED_TARGET"
 if ln -sf "$PLANTED_TARGET" "$PLANTED_DIR/statusline-usage-cache.json" 2>/dev/null &&
    sees_symlink "$PLANTED_DIR/statusline-usage-cache.json"; then

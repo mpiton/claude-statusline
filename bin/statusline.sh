@@ -194,7 +194,7 @@ cache_is_fresh() {
 # The stdin-rates path runs this in the background; its current render keeps
 # using stdin and the next render gets the extra-usage data written here.
 refresh_usage_cache() {
-    local token="" blob creds_file response
+    local token="" blob creds_file response cache_tmp
     USAGE_RESPONSE=""
 
     if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
@@ -230,7 +230,13 @@ refresh_usage_cache() {
             "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
         if [ -n "$response" ] && jq -e '.five_hour' <<< "$response" >/dev/null 2>&1; then
             USAGE_RESPONSE="$response"
-            cache_writable "$cache_file" && printf '%s' "$response" > "$cache_file" 2>/dev/null
+            if cache_writable "$cache_file" &&
+               cache_tmp=$(mktemp "$cache_dir/.statusline-usage.XXXXXX" 2>/dev/null); then
+                if ! printf '%s' "$response" > "$cache_tmp" 2>/dev/null ||
+                   ! mv -f "$cache_tmp" "$cache_file" 2>/dev/null; then
+                    rm -f "$cache_tmp"
+                fi
+            fi
         fi
     fi
 }
@@ -294,10 +300,10 @@ fi
 # of these files is then theirs to choose: the git dirty flag, and the credit
 # amounts this renders as currency.
 #
-# A directory that is a symlink, or that someone else owns, turns caching off
-# rather than being written into. The empty paths that leaves fail closed
-# through cache_readable/cache_writable, which vet the individual files too —
-# the directory passing does not mean everything inside it came from here.
+# A directory that is a symlink, belongs to someone else, or is not private
+# turns caching off. The empty paths that leaves fail closed through the cache
+# helpers below. Git Bash exposes Windows ACLs as a synthetic 755 regardless of
+# chmod, so only the ownership and symlink checks are meaningful there.
 cache_dir="${CLAUDE_STATUSLINE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/claude-statusline}"
 cache_max_age=60
 extra_cache_max_age=300
@@ -307,7 +313,17 @@ extra_cache_max_age=300
 if [ ! -d "$cache_dir" ]; then
     mkdir -p "$cache_dir" 2>/dev/null && chmod 700 "$cache_dir" 2>/dev/null
 fi
+cache_dir_private=false
 if [ -d "$cache_dir" ] && [ ! -L "$cache_dir" ] && [ -O "$cache_dir" ]; then
+    case "$OSTYPE" in
+        msys*|cygwin*) cache_dir_private=true ;;
+        *)
+            cache_dir_mode=$(stat -c %a "$cache_dir" 2>/dev/null || stat -f %Lp "$cache_dir" 2>/dev/null)
+            [ "$cache_dir_mode" = 700 ] && cache_dir_private=true
+            ;;
+    esac
+fi
+if $cache_dir_private; then
     cache_file="$cache_dir/statusline-usage-cache.json"
     dirty_cache="$cache_dir/statusline-dirty-cache"
 else
