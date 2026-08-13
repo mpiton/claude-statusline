@@ -204,6 +204,19 @@ assert "dirty worktree gets a star" "Opus 5 │ ✍️ 25% │ repo-dirty (main*
 
 $RATES"
 
+# The dirty flag is cached for a couple of seconds to skip a worktree walk per
+# render. These two renders land inside that window, so a cache keyed on
+# anything coarser than the directory would carry the star across.
+render "$(payload)"
+assert "the cached dirty flag does not leak into another directory" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
+render "$(payload '.cwd = "'"$REPO_DIRTY"'"')"
+assert "nor does the cached clean flag" "Opus 5 │ ✍️ 25% │ repo-dirty (main*)
+
+$RATES"
+
 render "$(payload 'del(.model)')"
 assert_line1_re "missing model falls back to Claude" '^Claude │'
 

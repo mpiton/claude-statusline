@@ -199,6 +199,7 @@ fi
 
 cache_dir="${CLAUDE_STATUSLINE_CACHE_DIR:-/tmp/claude}"
 cache_file="$cache_dir/statusline-usage-cache.json"
+dirty_cache="$cache_dir/statusline-dirty-cache"
 cache_max_age=60
 [ -d "$cache_dir" ] || mkdir -p "$cache_dir"
 
@@ -217,8 +218,29 @@ dirname=${dirname##*/}
 git_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
 git_dirty=""
 if [ -n "$git_branch" ]; then
-    if [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)" ]; then
-        git_dirty="*"
+    # `status --porcelain` walks the whole worktree; on a large repo that is
+    # most of the render. The answer is worth reusing for a couple of seconds —
+    # long enough to skip the walk between two turns, short enough that a star
+    # never looks stuck. $EPOCHSECONDS is bash 5 and macOS ships 3.2, so
+    # without a free clock the walk just runs, rather than forking `date` to
+    # decide whether to fork `git`.
+    now_s=${EPOCHSECONDS:-}
+    dirty_hit=""
+    if [ -n "$now_s" ] && [ -f "$dirty_cache" ]; then
+        IFS=$'\x1f' read -r cached_expiry cached_dirty cached_cwd < "$dirty_cache"
+        if [ "$cached_cwd" = "$cwd" ] && is_num "$cached_expiry" && [ "$now_s" -lt "$cached_expiry" ]; then
+            dirty_hit=yes
+            git_dirty=$cached_dirty
+        fi
+    fi
+    if [ -z "$dirty_hit" ]; then
+        if [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)" ]; then
+            git_dirty="*"
+        fi
+        if [ -n "$now_s" ]; then
+            printf '%s\x1f%s\x1f%s\n' "$(( now_s + 2 ))" "$git_dirty" "$cwd" \
+                > "$dirty_cache" 2>/dev/null
+        fi
     fi
 fi
 
