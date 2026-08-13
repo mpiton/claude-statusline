@@ -169,6 +169,14 @@ assert_dir() {
     if [ -d "$2" ]; then report_pass "$1"; else report_fail "$1" "directory $2" "$(ls -ld "$2" 2>&1)"; fi
 }
 
+# assert_file <name> <path> <contents> — a file a render was not supposed to touch.
+assert_file() {
+    selected "$1" || return 0
+    local got
+    got=$(cat "$2" 2>&1)
+    if [ "$got" = "$3" ]; then report_pass "$1"; else report_fail "$1" "$3" "$got"; fi
+}
+
 dir_mode() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null; }
 
 # assert_mode <name> <path> <octal>
@@ -431,6 +439,21 @@ assert "a stale cache drops the extra-usage line" "Opus 5 │ ✍️ 25% │ rep
 
 $RATES"
 
+# Same body on the path that does refresh, with the refresh failing (no token to
+# make the call with). Falling back to the cache is the point — a bar behind by
+# some minutes still says something, and the reset time next to it dates it. The
+# credits have nothing dating them, so they are what the fallback drops.
+STALE_BODY='{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
+             "seven_day":{"utilization":18.7,"resets_at":"2026-08-10T22:13:20Z"},
+             "extra_usage":{"is_enabled":true,"utilization":30,"used_credits":1234,"monthly_limit":5000}}'
+seed_cache "$STALE_BODY"
+touch -t 200001010000 "$CACHE_FILE"
+render "$(payload 'del(.rate_limits)')"
+assert "a failed refresh keeps the stale bars and drops the stale credits" \
+    "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
 seed_cache 'not json at all'
 render "$(payload)"
 assert "a corrupt cache does not break the render" "Opus 5 │ ✍️ 25% │ repo-clean (main)
@@ -488,12 +511,45 @@ FOREIGN="a cache directory owned by someone else is refused"
 FOREIGN_CACHE="/tmp/statusline-usage-cache.json"
 if [ -O /tmp ] || [ -L /tmp ]; then
     skip "$FOREIGN" "/tmp is not another user's here"
-elif ! printf '%s' "$API_BODY" > "$FOREIGN_CACHE" 2>/dev/null; then
-    skip "$FOREIGN" "cannot seed $FOREIGN_CACHE"
+# This fixture writes a predictable name into a directory anyone can write, so
+# it is open to the very trick it exists to test: whatever already sits at that
+# path could be someone else's symlink pointing at a file this user owns.
+# `noclobber` opens with O_EXCL, so either nothing is there or there is no
+# fixture. Anything left behind by a killed run skips the case rather than
+# being cleared, since by then it is no longer ours to judge.
+elif ! (set -o noclobber; printf '%s' "$API_BODY" > "$FOREIGN_CACHE") 2>/dev/null; then
+    skip "$FOREIGN" "$FOREIGN_CACHE is not ours to create"
 else
     render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR=/tmp
     assert "$FOREIGN" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
     rm -f "$FOREIGN_CACHE"
+fi
+
+# A directory clearing every check above can still hold a file that did not come
+# from here: it may predate this script, or CLAUDE_STATUSLINE_CACHE_DIR may point
+# somewhere the caller left group-writable. So the files get checked too.
+PLANTED_LINK="a symlinked cache file is not read"
+PLANTED_WRITE="nor written through"
+PLANTED_DIR="$TMP/planted"
+PLANTED_TARGET="$TMP/planted-target.json"
+mkdir -p "$PLANTED_DIR"
+printf '%s' "$API_BODY" > "$PLANTED_TARGET"
+if ln -sf "$PLANTED_TARGET" "$PLANTED_DIR/statusline-usage-cache.json" 2>/dev/null &&
+   sees_symlink "$PLANTED_DIR/statusline-usage-cache.json"; then
+    # Without the read guard the body behind the link supplies these rate lines.
+    render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR="$PLANTED_DIR"
+    assert "$PLANTED_LINK" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
+
+    # And the more damaging half: a refresh that succeeds would truncate whatever
+    # the link points at. Here that is a file of ours; in the real version of this
+    # it is whichever of the user's files the attacker named.
+    printf 'not the cache' > "$PLANTED_TARGET"
+    render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR="$PLANTED_DIR" \
+        CLAUDE_CODE_OAUTH_TOKEN=test-token STUB_CURL_BODY="$TMP/api-response.json"
+    assert_file "$PLANTED_WRITE" "$PLANTED_TARGET" 'not the cache'
+else
+    skip "$PLANTED_LINK" "no symlink support here"
+    skip "$PLANTED_WRITE" "no symlink support here"
 fi
 
 section "locale"

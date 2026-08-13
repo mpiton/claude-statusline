@@ -33,7 +33,9 @@ brew install jq
 Rate limit responses and the git dirty flag are cached in
 `${XDG_CACHE_HOME:-~/.cache}/claude-statusline`, created private to you.
 `CLAUDE_STATUSLINE_CACHE_DIR` moves it. A directory that is a symlink, or that
-another user owns, is left alone and caching is skipped for that run.
+another user owns, is left alone and caching is skipped for that run. Inside a
+directory that passes, each cache file is checked the same way, so a file
+planted before the first render is neither read nor written through.
 
 ## Tests
 
