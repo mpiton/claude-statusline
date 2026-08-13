@@ -32,9 +32,17 @@ passed=0; failed=0; skipped=0
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/bin/bash
-while [ -n "${STUB_CURL_GATE:-}" ] && [ ! -f "$STUB_CURL_GATE" ]; do
-    sleep 0.02
-done
+if [ -n "${STUB_CURL_GATE:-}" ]; then
+    [ -n "${STUB_CURL_WAITING:-}" ] && : > "$STUB_CURL_WAITING"
+    for _ in {1..600}; do
+        [ -f "$STUB_CURL_GATE" ] && break
+        sleep 0.05
+    done
+    if [ ! -f "$STUB_CURL_GATE" ]; then
+        [ -n "${STUB_CURL_TIMED_OUT:-}" ] && : > "$STUB_CURL_TIMED_OUT"
+        exit 7
+    fi
+fi
 if [ -n "${STUB_CURL_BODY:-}" ] && [ -f "$STUB_CURL_BODY" ]; then
     cat "$STUB_CURL_BODY"
     exit 0
@@ -202,6 +210,14 @@ section() { [ -n "$FILTER" ] || printf "\n${dim}%s${reset}\n" "$1"; }
 # Renders share one cache; seed or clear it explicitly per case.
 seed_cache() { printf '%s' "$1" > "$CACHE_FILE"; }
 clear_cache() { rm -f "$CACHE_FILE"; }
+wait_for_file() {
+    local path=$1
+    for _ in {1..600}; do
+        [ -f "$path" ] && return 0
+        sleep 0.05
+    done
+    return 1
+}
 
 RATES_5H="current ●●●●○○○○○○  42% ⟳ 7:06am"
 RATES_7D="weekly  ●○○○○○○○○○  19% ⟳ aug 10, 10:13pm"
@@ -460,31 +476,32 @@ if selected "$ASYNC_CACHE"; then
     clear_cache
     (
         render "$(payload)" CLAUDE_CODE_OAUTH_TOKEN=test-token \
-            STUB_CURL_BODY="$TMP/extra-response.json" STUB_CURL_GATE="$TMP/curl-release"
+            STUB_CURL_BODY="$TMP/extra-response.json" STUB_CURL_GATE="$TMP/curl-release" \
+            STUB_CURL_WAITING="$TMP/curl-waiting" STUB_CURL_TIMED_OUT="$TMP/curl-timeout"
         printf '%s' "$STDOUT" > "$TMP/async-render-output"
-        : > "$TMP/render-done"
     ) &
     render_pid=$!
 
-    for _ in {1..100}; do
-        [ -f "$TMP/render-done" ] && break
-        sleep 0.02
-    done
-    render_finished=false
-    [ -f "$TMP/render-done" ] && render_finished=true
-    : > "$TMP/curl-release"
+    curl_waiting=false
+    wait_for_file "$TMP/curl-waiting" && curl_waiting=true
     wait "$render_pid"
+    render_finished=false
+    if [ "$curl_waiting" = true ] && [ ! -f "$TMP/curl-timeout" ]; then
+        render_finished=true
+    fi
+    : > "$TMP/curl-release"
 
-    for _ in {1..250}; do
-        [ -f "$CACHE_FILE" ] && jq -e '.extra_usage.is_enabled == true' "$CACHE_FILE" >/dev/null 2>&1 && break
-        sleep 0.02
-    done
+    cache_warmed=false
+    if [ "$render_finished" = true ] && wait_for_file "$CACHE_FILE" &&
+       jq -e '.extra_usage.is_enabled == true' "$CACHE_FILE" >/dev/null 2>&1; then
+        cache_warmed=true
+    fi
     async_output=$(<"$TMP/async-render-output")
     expected_async="Opus 5 │ ✍️ 25% │ repo-clean (main)
 
 $RATES"
-    if $render_finished && [ "$async_output" = "$expected_async" ] &&
-       [ -f "$CACHE_FILE" ] && jq -e '.extra_usage.is_enabled == true' "$CACHE_FILE" >/dev/null 2>&1; then
+    if [ "$render_finished" = true ] && [ "$async_output" = "$expected_async" ] &&
+       [ "$cache_warmed" = true ]; then
         report_pass "$ASYNC_CACHE"
     else
         report_fail "$ASYNC_CACHE" \
