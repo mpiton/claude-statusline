@@ -28,6 +28,13 @@ On macOS:
 brew install jq
 ```
 
+## Cache
+
+Rate limit responses and the git dirty flag are cached in
+`${XDG_CACHE_HOME:-~/.cache}/claude-statusline`, created private to you.
+`CLAUDE_STATUSLINE_CACHE_DIR` moves it. A directory that is a symlink, or that
+another user owns, is left alone and caching is skipped for that run.
+
 ## Tests
 
 ```bash

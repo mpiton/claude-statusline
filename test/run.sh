@@ -19,7 +19,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 export TZ=UTC
-unset CLAUDE_CODE_OAUTH_TOKEN GIT_DIR GIT_WORK_TREE
+unset CLAUDE_CODE_OAUTH_TOKEN GIT_DIR GIT_WORK_TREE XDG_CACHE_HOME
 export GIT_CEILING_DIRECTORIES="$TMP"
 
 green='\033[32m'; red='\033[31m'; yellow='\033[33m'; dim='\033[2m'; reset='\033[0m'
@@ -161,6 +161,20 @@ assert_color() {
         *"$2"*) report_pass "$1" ;;
         *) report_fail "$1" "contains $(printf '%q' "$2")" "$(printf '%q' "$RAW1")" ;;
     esac
+}
+
+# assert_dir <name> <path> — the directory a render was supposed to create.
+assert_dir() {
+    selected "$1" || return 0
+    if [ -d "$2" ]; then report_pass "$1"; else report_fail "$1" "directory $2" "$(ls -ld "$2" 2>&1)"; fi
+}
+
+# assert_mode <name> <path> <octal>
+assert_mode() {
+    selected "$1" || return 0
+    local mode
+    mode=$(stat -c %a "$2" 2>/dev/null || stat -f %Lp "$2" 2>/dev/null)
+    if [ "$mode" = "$3" ]; then report_pass "$1"; else report_fail "$1" "mode $3" "mode ${mode:-unknown}"; fi
 }
 
 assert_no_stderr() {
@@ -377,12 +391,43 @@ clear_cache
 render "$(payload 'del(.rate_limits)')" CLAUDE_CODE_OAUTH_TOKEN=test-token
 assert "a failing API call degrades to no rate lines" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
 
-seed_cache '{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
+# On the path that does refresh, a stale cache means refetch rather than reuse.
+# The seeded body reads 99% with no weekly line, so reusing it would show.
+seed_cache '{"five_hour":{"utilization":99,"resets_at":"2026-08-06T07:06:40Z"}}'
+touch -t 200001010000 "$CACHE_FILE"
+render "$(payload 'del(.rate_limits)')" \
+    CLAUDE_CODE_OAUTH_TOKEN=test-token STUB_CURL_BODY="$TMP/api-response.json"
+assert "a stale cache is refetched, not reused" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
+EXTRA_BODY='{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
              "extra_usage":{"is_enabled":true,"utilization":30,"used_credits":1234,"monthly_limit":5000}}'
+
+seed_cache "$EXTRA_BODY"
 render "$(payload 'del(.rate_limits)')"
 # shellcheck disable=SC2016  # `\$` and `$` are regex, not shell expansions.
 assert_re "extra usage renders credits against the monthly limit" \
     'extra   ●●●○○○○○○○ \$12\.34/\$50\.00 ⟳ [a-z]{3} 1$'
+
+# Extra usage is the one thing stdin never reports, so the cache is still read
+# when stdin covered the rate limits.
+seed_cache "$EXTRA_BODY"
+render "$(payload)"
+# shellcheck disable=SC2016  # `\$` and `$` are regex, not shell expansions.
+assert_re "extra usage rides alongside rate limits from stdin" \
+    'extra   ●●●○○○○○○○ \$12\.34/\$50\.00'
+
+# Nothing on that path ever refreshes the cache, so an unbounded-age read put
+# credit amounts on screen from whenever the last refreshing render happened to
+# run. Currency of unknown age reads as current, so a stale cache drops the
+# line instead.
+seed_cache "$EXTRA_BODY"
+touch -t 200001010000 "$CACHE_FILE"
+render "$(payload)"
+assert "a stale cache drops the extra-usage line" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
 
 seed_cache 'not json at all'
 render "$(payload)"
@@ -390,6 +435,50 @@ assert "a corrupt cache does not break the render" "Opus 5 │ ✍️ 25% │ re
 
 $RATES"
 clear_cache
+
+section "cache directory"
+
+# Both defaults are derived rather than passed in, so these cases drop the
+# override the rest of the suite runs with.
+DEFAULT_CACHE_DIR="$HOME/.cache/claude-statusline"
+rm -rf "$HOME/.cache"
+render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR
+assert_dir "the cache lands under \$HOME/.cache by default" "$DEFAULT_CACHE_DIR"
+assert_mode "a created cache directory is private" "$DEFAULT_CACHE_DIR" 700
+
+rm -rf "$TMP/xdg"
+render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR XDG_CACHE_HOME="$TMP/xdg"
+assert_dir "XDG_CACHE_HOME moves it" "$TMP/xdg/claude-statusline"
+
+# The shared-/tmp attack in miniature: a directory someone else can point
+# elsewhere is not written into and not read back. Without the guard the seeded
+# cache behind the link would supply the rate lines this expects to be missing.
+LINK_TARGET="$TMP/link-target"
+mkdir -p "$LINK_TARGET"
+printf '%s' "$API_BODY" > "$LINK_TARGET/statusline-usage-cache.json"
+SYMLINKED="a symlinked cache directory is refused"
+if ln -s "$LINK_TARGET" "$TMP/link" 2>/dev/null; then
+    render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR="$TMP/link"
+    assert "$SYMLINKED" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
+else
+    skip "$SYMLINKED" "no symlink support here"
+fi
+
+# The other half, and the case the move is for: a directory someone else owns
+# holding a cache file this user can still write. /tmp is that directory on any
+# multi-user host — which is what the old default sat in. Skipped where /tmp is
+# this user's own (Git Bash) or a symlink the case above already covers (macOS).
+FOREIGN="a cache directory owned by someone else is refused"
+FOREIGN_CACHE="/tmp/statusline-usage-cache.json"
+if [ -O /tmp ] || [ -L /tmp ]; then
+    skip "$FOREIGN" "/tmp is not another user's here"
+elif ! printf '%s' "$API_BODY" > "$FOREIGN_CACHE" 2>/dev/null; then
+    skip "$FOREIGN" "cannot seed $FOREIGN_CACHE"
+else
+    render "$(payload 'del(.rate_limits)')" CLAUDE_STATUSLINE_CACHE_DIR=/tmp
+    assert "$FOREIGN" "Opus 5 │ ✍️ 25% │ repo-clean (main)"
+    rm -f "$FOREIGN_CACHE"
+fi
 
 section "locale"
 
