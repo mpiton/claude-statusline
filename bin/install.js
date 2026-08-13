@@ -34,6 +34,14 @@ function fail(msg) {
 
 const DEPS = ["jq", "curl", "git"];
 
+// curl and git come with the OS or with Git for Windows; jq is the one people
+// have to go and get, so the failure message says how.
+const JQ_INSTALL =
+  {
+    darwin: "brew install jq",
+    win32: "winget install jqlang.jq",
+  }[process.platform] || "sudo apt install jq, or whatever your distro uses";
+
 // Ask bash what it can see, since bash is what runs the statusline at render
 // time. The probe used to be `which jq`, which execSync hands to cmd.exe on
 // Windows — there is no `which` there, so all three looked missing and the
@@ -119,7 +127,7 @@ function run() {
       log(`  ${dim}Claude Code runs the statusline through bash${reset}`);
     }
     if (missing.includes("jq")) {
-      log(`  ${dim}${process.platform === "win32" ? "winget install jqlang.jq" : "brew install jq"}${reset}`);
+      log(`  ${dim}${JQ_INSTALL}${reset}`);
     }
     process.exit(1);
   }
