@@ -204,6 +204,76 @@ assert "dirty worktree gets a star" "Opus 5 │ ✍️ 25% │ repo-dirty (main*
 
 $RATES"
 
+# The dirty flag is cached to skip a worktree walk per render. Each case seeds
+# the entry rather than inheriting one from the case above: leaving it to
+# residue would let these pass on a slow runner, where the real entry has
+# expired before the render that is supposed to reject it. The expiry is far
+# enough out that no case has to reason about the clock.
+LEAK="a cached dirty flag does not leak into another directory"
+LEAK2="nor does a cached clean flag"
+CACHED="a cached flag is reused within its own directory"
+EXPIRED="an expired entry is ignored"
+CORRUPT="a corrupt entry is ignored"
+CORRUPT_QUIET="a corrupt entry does not warn"
+DIRTY_CACHE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-dirty-cache"
+rm -f "$DIRTY_CACHE"
+render "$(payload)"
+
+if [ ! -f "$DIRTY_CACHE" ]; then
+    # No $EPOCHSECONDS means no clock to expire an entry on, so the script
+    # never writes one and the whole feature is off. Nothing to seed against.
+    for name in "$LEAK" "$LEAK2" "$CACHED" "$EXPIRED" "$CORRUPT" "$CORRUPT_QUIET"; do
+        skip "$name" "no dirty-flag cache before bash 5"
+    done
+else
+    # Seed against the directory as the script spelled it, read back from the
+    # entry it just wrote. Under Git Bash the cwd it receives comes back
+    # MSYS-rewritten (`C:/Users/RUNNER~1/...`) whichever way the payload
+    # carries it, so a path spelled by hand here would key the entry on a
+    # directory the lookup never asks about, and every case would read as a
+    # miss.
+    IFS=$'\x1f' read -r _ _ SEEN_CWD < "$DIRTY_CACHE"
+    seed_dirty() { printf '%s\x1f%s\x1f%s' 9999999999 "$1" "$2" > "$DIRTY_CACHE"; }
+
+    seed_dirty '*' "$SEEN_CWD/elsewhere"
+    render "$(payload)"
+    assert "$LEAK" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
+    seed_dirty '' "$SEEN_CWD"
+    render "$(payload '.cwd = "'"$REPO_DIRTY"'"')"
+    assert "$LEAK2" "Opus 5 │ ✍️ 25% │ repo-dirty (main*)
+
+$RATES"
+
+    # The other half: a cache nothing reads would pass both cases above. A
+    # clean worktree printing a star can only come from the cached entry.
+    seed_dirty '*' "$SEEN_CWD"
+    render "$(payload)"
+    assert "$CACHED" "Opus 5 │ ✍️ 25% │ repo-clean (main*)
+
+$RATES"
+
+    # An entry past its expiry is a miss. Seeding one dead on arrival tests the
+    # clock without a case having to wait out the real two-second window.
+    printf '%s\x1f%s\x1f%s' 1 '*' "$SEEN_CWD" > "$DIRTY_CACHE"
+    render "$(payload)"
+    assert "$EXPIRED" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+
+    # A half-written entry is a miss too, and the expiry compare must not warn
+    # about the garbage it was handed.
+    printf '%s\x1f%s\x1f%s' 'nope' '*' "$SEEN_CWD" > "$DIRTY_CACHE"
+    render "$(payload)"
+    assert "$CORRUPT" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+    assert_no_stderr "$CORRUPT_QUIET"
+fi
+rm -f "$DIRTY_CACHE"
+
 render "$(payload 'del(.model)')"
 assert_line1_re "missing model falls back to Claude" '^Claude │'
 
@@ -214,6 +284,13 @@ assert_line1_re "context percentage tracks token usage" '✍️ 100%'
 
 render "$(payload '.context_window.context_window_size = 0')"
 assert_line1_re "zero window size falls back to 200k" '✍️ 25%'
+
+# A size of the wrong type used to survive the `-eq 0` guard — the test errors
+# out instead of comparing, the fallback never fires, and the percentage silently
+# reads 0 for the rest of the render.
+render "$(payload '.context_window.context_window_size = "wide"')"
+assert_line1_re "a non-numeric window size falls back to 200k" '✍️ 25%'
+assert_no_stderr "a non-numeric window size does not warn"
 
 render "$(payload '.context_window.current_usage.cache_read_input_tokens = 46000')"
 assert_color "context under 50% is green" $'\033[38;2;0;175;80m25%'
@@ -259,6 +336,14 @@ current ●●●●●●●●○○  88% ⟳ 7:06am"
 
 render "$(payload '.rate_limits.five_hour.used_percentage = 42.3')"
 assert_no_stderr "fractional percentages do not warn"
+
+# A reset time of 0 or null means "unknown", not "midnight 1970".
+for missing in 0 null; do
+    render "$(payload ".rate_limits.five_hour.resets_at = $missing | del(.rate_limits.seven_day)")"
+    assert "a $missing reset time drops the ⟳ suffix" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+current ●●●●○○○○○○  42%"
+done
 
 section "rate limits from the API cache"
 
