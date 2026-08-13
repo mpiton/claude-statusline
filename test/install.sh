@@ -14,6 +14,20 @@ FILTER="${1:-}"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# The same sandbox test/run.sh builds. One case runs the installed statusline
+# for real, and with no rate limits on stdin that script goes looking for an
+# OAuth token — env first, then the macOS keychain or the Linux keyring — and
+# calls api.anthropic.com with whatever it finds. Stub the three lookups so
+# `npm test` can't spend a developer's credentials.
+unset CLAUDE_CODE_OAUTH_TOKEN
+mkdir -p "$TMP/bin"
+printf '#!/bin/bash\nexit 7\n' > "$TMP/bin/curl"
+for stub in secret-tool security; do
+    printf '#!/bin/bash\nexit 1\n' > "$TMP/bin/$stub"
+done
+chmod +x "$TMP/bin"/*
+export PATH="$TMP/bin:$PATH"
+
 green='\033[32m'; red='\033[31m'; dim='\033[2m'; reset='\033[0m'
 passed=0; failed=0
 
@@ -71,8 +85,11 @@ check "it registers statusLine as a command hook" "command" \
     "$(jq -r '.statusLine.type // ""' "$HOME_A/.claude/settings.json" 2>/dev/null)"
 
 # The installed copy is what Claude Code actually runs, so it has to render.
+# cwd points at an empty directory: left to default it would be this repo, and
+# the render would shell out to git against whatever the checkout looks like.
 selected "the installed script renders" && {
-    rendered=$(printf '%s' '{"model":{"display_name":"Opus 5"}}' \
+    mkdir -p "$TMP/plain"
+    rendered=$(printf '{"model":{"display_name":"Opus 5"},"cwd":"%s"}' "$TMP/plain" \
         | env HOME="$HOME_A" CLAUDE_STATUSLINE_CACHE_DIR="$TMP/cache" \
           bash "$HOME_A/.claude/statusline.sh" 2>/dev/null | head -1)
     case "$rendered" in
