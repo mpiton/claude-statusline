@@ -59,6 +59,36 @@ are kept at most once a minute, only for the current reset window, and age out
 after five hours. The pace is green when its projection stays below 90% at the
 reset, yellow for 90–99%, and red when it would exhaust the allowance first.
 
+## Configuration
+
+Create `~/.claude/statusline.json` to override the defaults. The example below
+shows every supported setting; omitted keys keep their built-in value.
+
+```json
+{
+  "blocks": [
+    "model", "context", "directory", "cost", "changes", "style", "effort",
+    "current", "burn", "weekly", "extra"
+  ],
+  "bar_width": 10,
+  "colors": {
+    "blue": "#0099ff",
+    "orange": "#ffb055",
+    "green": "#00af50",
+    "cyan": "#56b6c2",
+    "red": "#ff5555",
+    "yellow": "#e6c800",
+    "white": "#dcdcdc",
+    "magenta": "#b48cff"
+  }
+}
+```
+
+Blocks always render in the order above; the array only selects them. `burn`
+is part of `current`, and has no effect when `current` is hidden. `bar_width`
+accepts integers from 1 to 40 and colors accept `#RRGGBB`. Invalid values are
+ignored. Set `CLAUDE_STATUSLINE_CONFIG` to use another file.
+
 ## Tests
 
 ```bash

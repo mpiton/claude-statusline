@@ -69,6 +69,7 @@ export STATUSLINE_TEST_POLL_ATTEMPTS=600 STATUSLINE_TEST_POLL_DELAY=0.05
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/bin/bash
+[ -n "${STUB_CURL_CALLED:-}" ] && : > "$STUB_CURL_CALLED"
 if [ -n "${STUB_CURL_GATE:-}" ]; then
     [ -n "${STUB_CURL_WAITING:-}" ] && : > "$STUB_CURL_WAITING"
     for ((i=0; i<STATUSLINE_TEST_POLL_ATTEMPTS; i++)); do
@@ -95,6 +96,7 @@ export PATH="$TMP/bin:$PATH"
 export HOME="$TMP/home"
 mkdir -p "$HOME/.claude"
 echo '{}' > "$HOME/.claude/settings.json"
+CONFIG_FILE="$HOME/.claude/statusline.json"
 
 export CLAUDE_STATUSLINE_CACHE_DIR="$TMP/cache"
 mkdir -m 700 "$CLAUDE_STATUSLINE_CACHE_DIR"
@@ -389,6 +391,51 @@ assert "COLUMNS counts CJK characters as two cells" "界界…"
 
 render "$(payload 'del(.rate_limits) | .model.display_name = "e\u0301e\u0301e\u0301"')" COLUMNS=3
 assert "COLUMNS does not count combining marks twice" "éé…"
+
+section "configuration"
+
+printf '{"blocks":["model","current"],"bar_width":4}\n' > "$CONFIG_FILE"
+clear_cache
+render "$(payload)"
+assert "config selects blocks and bar width" "Opus 5
+
+current ●○○○  42% ⟳ 7:06am"
+
+printf '{"blocks":[]}\n' > "$CONFIG_FILE"
+render "$(payload)"
+assert "an empty block list renders nothing" ""
+
+printf '{"blocks":["model"]}\n' > "$CONFIG_FILE"
+clear_cache
+render "$(payload 'del(.rate_limits)')" CLAUDE_CODE_OAUTH_TOKEN=test-token \
+    STUB_CURL_CALLED="$TMP/config-curl-called"
+assert "hidden rate blocks do not fetch usage" "Opus 5"
+selected "hidden rate blocks do not fetch usage from the API" && {
+    if [ ! -e "$TMP/config-curl-called" ]; then
+        report_pass "hidden rate blocks do not fetch usage from the API"
+    else
+        report_fail "hidden rate blocks do not fetch usage from the API" "no curl call" "curl was called"
+    fi
+}
+
+printf '{"colors":{"blue":"#010203","green":"#040506"}}\n' > "$CONFIG_FILE"
+render "$(payload)"
+assert_color "config overrides named colors" $'\033[38;2;1;2;3mOpus 5'
+assert_color "configured threshold colors reach context" $'\033[38;2;4;5;6m25%'
+
+printf '{"bar_width":0,"colors":{"blue":"not-a-color"}}\n' > "$CONFIG_FILE"
+render "$(payload)"
+assert_color "invalid config values keep color defaults" $'\033[38;2;0;153;255mOpus 5'
+assert_re "invalid config values keep bar defaults" 'current ●●●●○○○○○○  42%'
+
+printf 'not json\n' > "$CONFIG_FILE"
+render "$(payload)"
+assert "malformed config falls back without breaking output" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+assert_no_stderr "malformed config does not warn"
+
+printf '{}\n' > "$CONFIG_FILE"
 
 section "context window"
 
