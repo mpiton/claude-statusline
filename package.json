@@ -1,9 +1,9 @@
 {
-  "name": "@kamranahmedse/claude-statusline",
-  "version": "1.0.6",
+  "name": "claude-line",
+  "version": "2.0.0",
   "description": "A status line for Claude Code CLI showing model, context usage, rate limits, and more",
   "bin": {
-    "claude-statusline": "./bin/install.js"
+    "claude-line": "bin/install.js"
   },
   "files": [
     "bin",
@@ -22,5 +22,10 @@
     "cli"
   ],
   "license": "MIT",
-  "author": "Kamran Ahmed"
+  "author": "Mathieu Piton",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mpiton/claude-statusline.git"
+  },
+  "homepage": "https://github.com/mpiton/claude-statusline#readme"
 }

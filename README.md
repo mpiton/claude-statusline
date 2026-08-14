@@ -1,4 +1,4 @@
-# claude-statusline
+# Claude Line
 
 [![CI](https://github.com/mpiton/claude-statusline/actions/workflows/ci.yml/badge.svg)](https://github.com/mpiton/claude-statusline/actions/workflows/ci.yml)
 
@@ -11,15 +11,16 @@ Configure your Claude Code statusline to show limits, directory and git info
 Run the command below to set it up
 
 ```bash
-npx @kamranahmedse/claude-statusline
+npx claude-line
 ```
 
-It backups your old status line if any and copies the status line script to `~/.claude/statusline.sh` and configures your Claude Code settings.
+It backs up your old status line if any, copies the status line script to
+`~/.claude/statusline.sh`, and configures your Claude Code settings.
 
 The installed copy carries the release it came from on its second line:
 
 ```bash
-sed -n 2p ~/.claude/statusline.sh    # => # statusline-version: 1.0.6
+sed -n 2p ~/.claude/statusline.sh    # => # statusline-version: 2.0.0
 ```
 
 Rerun the install command to update it. A copy that is already current is left
@@ -106,7 +107,7 @@ Both take a filter argument. CI runs shellcheck, then the full suite on Linux, m
 ## Uninstall
 
 ```bash
-npx @kamranahmedse/claude-statusline --uninstall
+npx claude-line --uninstall
 ```
 
 If you had a previous statusline, it restores it from the backup. Otherwise it
