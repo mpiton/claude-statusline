@@ -54,6 +54,10 @@ another user owns, is left alone and caching is skipped for that run. Inside a
 directory that passes, each cache file is checked the same way, so a file
 planted before the first render is neither read nor written through.
 
+The five-hour line adds a burn rate after one minute of observations. Samples
+are kept at most once a minute, only for the current reset window, and age out
+after five hours.
+
 ## Tests
 
 ```bash

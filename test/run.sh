@@ -99,6 +99,7 @@ echo '{}' > "$HOME/.claude/settings.json"
 export CLAUDE_STATUSLINE_CACHE_DIR="$TMP/cache"
 mkdir -m 700 "$CLAUDE_STATUSLINE_CACHE_DIR"
 CACHE_FILE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-usage-cache.json"
+HISTORY_FILE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-usage-history"
 
 REPO_CLEAN="$TMP/repo-clean"
 REPO_DIRTY="$TMP/repo-dirty"
@@ -192,6 +193,11 @@ assert() {
 assert_re() {
     selected "$1" || return 0
     if [[ "$STDOUT" =~ $2 ]]; then report_pass "$1"; else report_fail "$1" "=~ $2" "$(printf '%q' "$STDOUT")"; fi
+}
+
+assert_not_re() {
+    selected "$1" || return 0
+    if [[ ! "$STDOUT" =~ $2 ]]; then report_pass "$1"; else report_fail "$1" "!~ $2" "$(printf '%q' "$STDOUT")"; fi
 }
 
 # Line-1 variants. `$` in a bash regex anchors the end of the whole string, so
@@ -464,6 +470,46 @@ for missing in 0 null; do
 current ●●●●○○○○○○  42%"
 done
 
+section "burn rate history"
+
+BURN_NOW=$(date +%s)
+BURN_RESET=$(( BURN_NOW + 3600 ))
+printf '%s\x1f%s\x1f%s\n' "$BURN_RESET" "$(( BURN_NOW - 3600 ))" 20 > "$HISTORY_FILE"
+render "$(payload '.rate_limits.five_hour.used_percentage = 50
+                    | .rate_limits.five_hour.resets_at = '"$BURN_RESET"'
+                    | del(.rate_limits.seven_day)')"
+assert_re "burn rate comes from cached samples in the current window" \
+    'current ●●●●●○○○○○  50% ↗ (29\.[0-9]|30\.0)%/h ⟳'
+
+render "$(payload '.rate_limits.five_hour.used_percentage = 50
+                    | .rate_limits.five_hour.resets_at = '"$BURN_RESET"'
+                    | del(.rate_limits.seven_day)')" LC_ALL=C
+assert_re "burn rate has an ASCII fallback" \
+    'current #####-----  50% burn (29\.[0-9]|30\.0)%/h reset'
+
+selected "the current burn sample is appended to history" && {
+    saved_reset=""; saved_time=""; saved_pct=""
+    while IFS=$'\x1f' read -r found_reset found_time found_pct; do
+        saved_reset=$found_reset; saved_time=$found_time; saved_pct=$found_pct
+    done < "$HISTORY_FILE"
+    case "$saved_time" in ''|*[!0-9]*) saved_time_valid=false ;; *) saved_time_valid=true ;; esac
+    if [ "$saved_reset" = "$BURN_RESET" ] && [ "$saved_pct" = 50 ] &&
+       [ "$saved_time_valid" = true ] && [ "$saved_time" -ge "$BURN_NOW" ]; then
+        report_pass "the current burn sample is appended to history"
+    else
+        report_fail "the current burn sample is appended to history" \
+            "reset=$BURN_RESET time>=$BURN_NOW pct=50" \
+            "reset=$saved_reset time=$saved_time pct=$saved_pct"
+    fi
+}
+
+# A new reset is a new rate-limit window, so a previous window cannot skew it.
+NEXT_RESET=$(( BURN_RESET + 300 ))
+render "$(payload '.rate_limits.five_hour.used_percentage = 51
+                    | .rate_limits.five_hour.resets_at = '"$NEXT_RESET"'
+                    | del(.rate_limits.seven_day)')"
+assert_not_re "a reset change starts a fresh burn history" '%/h'
+
 section "rate limits from the API cache"
 
 API_BODY='{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
@@ -699,6 +745,22 @@ if ln -sf "$PLANTED_TARGET" "$PLANTED_DIR/statusline-usage-cache.json" 2>/dev/nu
 else
     skip "$PLANTED_LINK" "no symlink support here"
     skip "$PLANTED_WRITE" "no symlink support here"
+fi
+
+HISTORY_LINK="a symlinked burn history is not written through"
+HISTORY_LINK_DIR="$TMP/history-link"
+HISTORY_LINK_TARGET="$TMP/history-target"
+mkdir -m 700 "$HISTORY_LINK_DIR"
+printf 'not the history' > "$HISTORY_LINK_TARGET"
+if ln -s "$HISTORY_LINK_TARGET" "$HISTORY_LINK_DIR/statusline-usage-history" 2>/dev/null &&
+   sees_symlink "$HISTORY_LINK_DIR/statusline-usage-history"; then
+    render "$(payload '.rate_limits.five_hour.used_percentage = 55
+                        | .rate_limits.five_hour.resets_at = '"$BURN_RESET"'
+                        | del(.rate_limits.seven_day)')" \
+        CLAUDE_STATUSLINE_CACHE_DIR="$HISTORY_LINK_DIR"
+    assert_file "$HISTORY_LINK" "$HISTORY_LINK_TARGET" 'not the history'
+else
+    skip "$HISTORY_LINK" "no symlink support here"
 fi
 
 section "locale"

@@ -37,11 +37,11 @@ reset='\033[0m'
 
 if $ascii_output; then
     sep_char="|"; context_char="ctx"; bar_filled="#"; bar_empty="-"; reset_char="reset"; danger_char="!"
-    truncate_char="..."
+    truncate_char="..."; burn_char="burn"
     effort_low="."; effort_medium=":"; effort_high="+"; effort_xhigh="*"; effort_max="!"
 else
     sep_char="│"; context_char="✍️"; bar_filled="●"; bar_empty="○"; reset_char="⟳"; danger_char="⚡"
-    truncate_char="…"
+    truncate_char="…"; burn_char="↗"
     effort_low="◔"; effort_medium="◑"; effort_high="◕"; effort_xhigh="●"; effort_max="●"
 fi
 sep=" ${dim}${sep_char}${reset} "
@@ -207,6 +207,63 @@ cache_is_fresh() {
     [ "$(( now - mtime ))" -lt "$max_age" ]
 }
 
+# update_burn_history <pct> <reset-epoch> → $BURN_RATE_TENTHS.
+# Samples are minute-spaced, tied to one reset window and capped at five hours.
+# A utilization drop starts a new series instead of reporting a negative rate.
+update_burn_history() {
+    local pct=$1 reset_epoch=$2 now history_source history_tmp result
+    BURN_RATE_TENTHS=""
+
+    is_num "$pct" && [ "$pct" -le 100 ] || return
+    is_num "$reset_epoch" || return
+    now=$(date +%s 2>/dev/null)
+    is_num "$now" || return
+    [ "$reset_epoch" -gt "$now" ] && [ "$(( reset_epoch - now ))" -le 21600 ] || return
+    cache_writable "$history_cache" || return
+
+    history_source=/dev/null
+    cache_readable "$history_cache" && history_source=$history_cache
+    history_tmp=$(mktemp "$cache_dir/.statusline-history.XXXXXX" 2>/dev/null) || return
+
+    result=$(awk -v reset_epoch="$reset_epoch" -v now="$now" -v pct="$pct" \
+        -v out="$history_tmp" '
+        BEGIN { FS = OFS = sprintf("%c", 31) }
+        function integer(value) { return value ~ /^[0-9]+$/ }
+        $1 == reset_epoch && integer($2) && integer($3) &&
+        $2 >= now - 18000 && $2 <= now && $3 <= 100 {
+            if (n == 0 || $2 >= sample_time[n]) {
+                n++
+                sample_time[n] = $2
+                sample_pct[n] = $3
+            }
+        }
+        END {
+            if (n > 0 && pct < sample_pct[n]) n = 0
+            if (n == 0 || now - sample_time[n] >= 60) {
+                n++
+                sample_time[n] = now
+                sample_pct[n] = pct
+            }
+
+            first = n > 301 ? n - 300 : 1
+            for (i = first; i <= n; i++)
+                print reset_epoch, sample_time[i], sample_pct[i] > out
+            close(out)
+
+            elapsed = now - sample_time[first]
+            delta = pct - sample_pct[first]
+            if (elapsed >= 60 && delta >= 0)
+                printf "%d", int(delta * 36000 / elapsed + 0.5)
+        }
+    ' "$history_source" 2>/dev/null)
+
+    if mv -f "$history_tmp" "$history_cache" 2>/dev/null; then
+        is_num "$result" && BURN_RATE_TENTHS=$result
+    else
+        rm -f "$history_tmp"
+    fi
+}
+
 # Fetches the usage payload into $USAGE_RESPONSE and warms the shared cache.
 # The stdin-rates path runs this in the background; its current render keeps
 # using stdin and the next render gets the extra-usage data written here.
@@ -343,9 +400,11 @@ fi
 if $cache_dir_private; then
     cache_file="$cache_dir/statusline-usage-cache.json"
     dirty_cache="$cache_dir/statusline-dirty-cache"
+    history_cache="$cache_dir/statusline-usage-history"
 else
     cache_file=""
     dirty_cache=""
+    history_cache=""
 fi
 
 # ── LINE 1: Model │ Context % │ Directory (branch) │ Effort ──
@@ -522,6 +581,14 @@ if [ -n "$usage_data" ]; then
     fi
 fi
 
+# The five-hour reset identifies the active window. One sample is not a rate;
+# the indicator appears after at least a minute of history has accumulated.
+update_burn_history "$five_hour_pct" "$five_hour_reset_epoch"
+burn_rate=""
+if is_num "$BURN_RATE_TENTHS"; then
+    printf -v burn_rate "%d.%d" "$(( BURN_RATE_TENTHS / 10 ))" "$(( BURN_RATE_TENTHS % 10 ))"
+fi
+
 # ── Rate limit lines ────────────────────────────────────
 rate_lines=""
 bar_width=10
@@ -533,6 +600,7 @@ if [ -n "$five_hour_pct" ]; then
     printf -v five_hour_pct_fmt "%3d" "$five_hour_pct"
 
     rate_lines+="${white}current${reset} ${BAR} ${COLOR}${five_hour_pct_fmt}%${reset}"
+    [ -n "$burn_rate" ] && rate_lines+=" ${dim}${burn_char}${reset} ${white}${burn_rate}%/h${reset}"
     [ -n "$five_hour_reset" ] && rate_lines+=" ${dim}${reset_char}${reset} ${white}${five_hour_reset}${reset}"
 fi
 
