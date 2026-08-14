@@ -86,6 +86,8 @@ node_home() {
 # two files differ by that one line and nothing else.
 # jq rather than node: node on Windows cannot require() the MSYS path $ROOT is.
 VERSION=$(jq -r .version "$ROOT/package.json")
+# shellcheck disable=SC2016  # $HOME stays literal in the command under test.
+MANAGED_COMMAND='bash "$HOME/.claude/statusline.sh"'
 # An empty version turns every check below into a substring match against
 # anything, which is how a broken lookup passed CI once already.
 [ -n "$VERSION" ] || {
@@ -270,6 +272,104 @@ HOME_D="$TMP/never-installed"
 mkdir -p "$HOME_D"
 install_into "$HOME_D" --uninstall
 check "uninstalling what was never installed is not an error" "0" "$STATUS"
+
+# An uninstall command must not claim the conventional path by itself. A user
+# script and the matching command can predate this package entirely.
+HOME_I="$TMP/foreign"
+mkdir -p "$HOME_I/.claude"
+printf '#!/bin/bash\nprintf mine\n' > "$HOME_I/.claude/statusline.sh"
+jq -n --arg command "$MANAGED_COMMAND" \
+    '{statusLine:{type:"command",command:$command}}' > "$HOME_I/.claude/settings.json"
+install_into "$HOME_I" --uninstall
+check "uninstall leaves an unrecognised statusline untouched" "#!/bin/bash
+printf mine" "$(cat "$HOME_I/.claude/statusline.sh")"
+check "it leaves that script's setting untouched" "$MANAGED_COMMAND" \
+    "$(jq -r '.statusLine.command' "$HOME_I/.claude/settings.json")"
+
+HOME_J="$TMP/custom-setting"
+mkdir -p "$HOME_J/.claude"
+printf '{"statusLine":{"type":"command","command":"printf custom"}}\n' \
+    > "$HOME_J/.claude/settings.json"
+install_into "$HOME_J" --uninstall
+check "uninstall leaves a custom statusLine command untouched" "printf custom" \
+    "$(jq -r '.statusLine.command' "$HOME_J/.claude/settings.json")"
+
+# Parse settings before changing the script, so malformed JSON cannot leave a
+# half-uninstalled setup behind.
+HOME_K="$TMP/broken-uninstall"
+mkdir -p "$HOME_K"
+install_into "$HOME_K"
+printf 'not json\n' > "$HOME_K/.claude/settings.json"
+install_into "$HOME_K" --uninstall
+check "uninstall aborts on malformed settings" "1" "$STATUS"
+check "a malformed settings file leaves the managed script in place" "$VERSION" \
+    "$(version_of "$HOME_K/.claude/statusline.sh")"
+
+# The published 1.0.6 blob predates the marker. Exercise it when the checkout
+# carries that ancestor; shallow source archives skip while the hash allowlist
+# remains deterministic in the installer.
+LEGACY_COMMIT=ea02c0e6dcd532fea6056f7eec2b7545b3666248
+if git cat-file -e "$LEGACY_COMMIT:bin/statusline.sh" 2>/dev/null; then
+    HOME_L="$TMP/legacy"
+    mkdir -p "$HOME_L/.claude"
+    git show "$LEGACY_COMMIT:bin/statusline.sh" > "$HOME_L/.claude/statusline.sh"
+    jq -n --arg command "$MANAGED_COMMAND" \
+        '{statusLine:{type:"command",command:$command}}' > "$HOME_L/.claude/settings.json"
+    install_into "$HOME_L" --uninstall
+    check "uninstall recognises a published pre-marker script" "gone" \
+        "$([ -e "$HOME_L/.claude/statusline.sh" ] && echo present || echo gone)"
+    check "legacy uninstall removes its managed setting" "null" \
+        "$(jq -r '.statusLine // "null"' "$HOME_L/.claude/settings.json")"
+
+    HOME_N="$TMP/legacy-upgrade"
+    mkdir -p "$HOME_N/.claude"
+    git show "$LEGACY_COMMIT:bin/statusline.sh" > "$HOME_N/.claude/statusline.sh"
+    install_into "$HOME_N"
+    check "upgrade recognises a published pre-marker script" "$VERSION" \
+        "$(version_of "$HOME_N/.claude/statusline.sh")"
+    check "legacy upgrade does not back up our old release" "gone" \
+        "$([ -e "$HOME_N/.claude/statusline.sh.bak" ] && echo present || echo gone)"
+    install_into "$HOME_N" --uninstall
+    check "an upgraded legacy install still uninstalls cleanly" "gone" \
+        "$([ -e "$HOME_N/.claude/statusline.sh" ] && echo present || echo gone)"
+
+    HOME_O="$TMP/legacy-twice"
+    mkdir -p "$HOME_O/.claude"
+    git show "$LEGACY_COMMIT:bin/statusline.sh" > "$HOME_O/.claude/statusline.sh"
+    git show "$LEGACY_COMMIT:bin/statusline.sh" > "$HOME_O/.claude/statusline.sh.bak"
+    jq -n --arg command "$MANAGED_COMMAND" \
+        '{statusLine:{type:"command",command:$command}}' > "$HOME_O/.claude/settings.json"
+    install_into "$HOME_O" --uninstall
+    check "legacy uninstall does not restore an old package backup" "gone gone" \
+        "$([ -e "$HOME_O/.claude/statusline.sh" ] && echo present || echo gone) \
+$([ -e "$HOME_O/.claude/statusline.sh.bak" ] && echo present || echo gone)"
+else
+    skip "uninstall recognises a published pre-marker script" "published ancestor not in shallow checkout"
+    skip "legacy uninstall removes its managed setting" "published ancestor not in shallow checkout"
+    skip "upgrade recognises a published pre-marker script" "published ancestor not in shallow checkout"
+    skip "legacy upgrade does not back up our old release" "published ancestor not in shallow checkout"
+    skip "an upgraded legacy install still uninstalls cleanly" "published ancestor not in shallow checkout"
+    skip "legacy uninstall does not restore an old package backup" "published ancestor not in shallow checkout"
+fi
+
+UNSAFE_BACKUP="uninstall refuses a symlinked backup"
+HOME_M="$TMP/unsafe-backup"
+mkdir -p "$HOME_M"
+install_into "$HOME_M"
+printf 'keep me' > "$TMP/unsafe-backup-target"
+if ln -s "$TMP/unsafe-backup-target" "$HOME_M/.claude/statusline.sh.bak" 2>/dev/null &&
+   [ -L "$HOME_M/.claude/statusline.sh.bak" ]; then
+    install_into "$HOME_M" --uninstall
+    if [ "$STATUS" -eq 1 ] && [ "$(version_of "$HOME_M/.claude/statusline.sh")" = "$VERSION" ] &&
+       [ "$(cat "$TMP/unsafe-backup-target")" = "keep me" ]; then
+        report_pass "$UNSAFE_BACKUP"
+    else
+        report_fail "$UNSAFE_BACKUP" "exit 1 + untouched script and target" \
+            "exit $STATUS version=$(version_of "$HOME_M/.claude/statusline.sh") target=$(cat "$TMP/unsafe-backup-target")"
+    fi
+else
+    skip "$UNSAFE_BACKUP" "no symlink support here"
+fi
 
 # A statusline.sh the user wrote themselves is backed up on install and handed
 # back on uninstall.

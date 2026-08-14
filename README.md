@@ -109,7 +109,10 @@ Both take a filter argument. CI runs shellcheck, then the full suite on Linux, m
 npx @kamranahmedse/claude-statusline --uninstall
 ```
 
-If you had a previous statusline, it restores it from the backup. Otherwise it removes the script and cleans up your settings.
+If you had a previous statusline, it restores it from the backup. Otherwise it
+removes the script and cleans up your settings. The uninstaller only changes a
+versioned copy from this package, or an exact copy of one of its pre-versioned
+npm releases; an unknown script or custom setting is left alone.
 
 ## License
 
