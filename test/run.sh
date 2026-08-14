@@ -37,20 +37,13 @@ if [ -z "$UTF8_LOCALE" ]; then
 fi
 export LC_ALL="$UTF8_LOCALE"
 
-TRASH_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
-TRASH_FALLBACK="$TRASH_DATA_HOME/Trash/files"
+TRASH_HOME=$HOME
 TMP=$(mktemp -d)
 discard() {
-    local item target
-    if command -v trash >/dev/null 2>&1 && XDG_DATA_HOME="$TRASH_DATA_HOME" trash "$@"; then
-        return
+    if command -v trash >/dev/null 2>&1; then
+        HOME="$TRASH_HOME" trash "$@" || :
     fi
-    mkdir -p "$TRASH_FALLBACK" || return
-    for item in "$@"; do
-        [ -e "$item" ] || continue
-        target="$TRASH_FALLBACK/${item##*/}.$$.${RANDOM}"
-        mv "$item" "$target"
-    done
+    # ponytail: without trash, leave mktemp-owned paths to OS temp cleanup.
 }
 trap 'discard "$TMP"' EXIT
 
@@ -733,7 +726,6 @@ section "cache directory"
 # Both defaults are derived rather than passed in, so these cases drop the
 # override the rest of the suite runs with.
 DEFAULT_CACHE_DIR="$HOME/.cache/claude-statusline"
-[ ! -e "$HOME/.cache" ] || discard "$HOME/.cache"
 render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR
 assert_dir "the cache lands under \$HOME/.cache by default" "$DEFAULT_CACHE_DIR"
 
@@ -759,7 +751,6 @@ else
     skip "$NONPRIVATE" "no POSIX modes on this filesystem"
 fi
 
-[ ! -e "$TMP/xdg" ] || discard "$TMP/xdg"
 render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR XDG_CACHE_HOME="$TMP/xdg"
 assert_dir "XDG_CACHE_HOME moves it" "$TMP/xdg/claude-statusline"
 

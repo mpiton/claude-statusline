@@ -11,20 +11,13 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 INSTALLER="$ROOT/bin/install.js"
 FILTER="${1:-}"
 
-TRASH_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
-TRASH_FALLBACK="$TRASH_DATA_HOME/Trash/files"
+TRASH_HOME=$HOME
 TMP=$(mktemp -d)
 discard() {
-    local item target
-    if command -v trash >/dev/null 2>&1 && XDG_DATA_HOME="$TRASH_DATA_HOME" trash "$@"; then
-        return
+    if command -v trash >/dev/null 2>&1; then
+        HOME="$TRASH_HOME" trash "$@" || :
     fi
-    mkdir -p "$TRASH_FALLBACK" || return
-    for item in "$@"; do
-        [ -e "$item" ] || continue
-        target="$TRASH_FALLBACK/${item##*/}.$$.${RANDOM}"
-        mv "$item" "$target"
-    done
+    # ponytail: without trash, leave mktemp-owned paths to OS temp cleanup.
 }
 trap 'discard "$TMP"' EXIT
 
