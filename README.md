@@ -56,7 +56,8 @@ planted before the first render is neither read nor written through.
 
 The five-hour line adds a burn rate after one minute of observations. Samples
 are kept at most once a minute, only for the current reset window, and age out
-after five hours.
+after five hours. The pace is green when its projection stays below 90% at the
+reset, yellow for 90–99%, and red when it would exhaust the allowance first.
 
 ## Tests
 

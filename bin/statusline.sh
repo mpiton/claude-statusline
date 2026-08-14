@@ -207,12 +207,13 @@ cache_is_fresh() {
     [ "$(( now - mtime ))" -lt "$max_age" ]
 }
 
-# update_burn_history <pct> <reset-epoch> → $BURN_RATE_TENTHS.
+# update_burn_history <pct> <reset-epoch> → $BURN_RATE_TENTHS and $BURN_NOW.
 # Samples are minute-spaced, tied to one reset window and capped at five hours.
 # A utilization drop starts a new series instead of reporting a negative rate.
 update_burn_history() {
     local pct=$1 reset_epoch=$2 now history_source history_tmp result
     BURN_RATE_TENTHS=""
+    BURN_NOW=""
 
     is_num "$pct" && [ "$pct" -le 100 ] || return
     is_num "$reset_epoch" || return
@@ -259,6 +260,7 @@ update_burn_history() {
 
     if mv -f "$history_tmp" "$history_cache" 2>/dev/null; then
         is_num "$result" && BURN_RATE_TENTHS=$result
+        BURN_NOW=$now
     else
         rm -f "$history_tmp"
     fi
@@ -585,8 +587,16 @@ fi
 # the indicator appears after at least a minute of history has accumulated.
 update_burn_history "$five_hour_pct" "$five_hour_reset_epoch"
 burn_rate=""
+burn_color=$green
 if is_num "$BURN_RATE_TENTHS"; then
     printf -v burn_rate "%d.%d" "$(( BURN_RATE_TENTHS / 10 ))" "$(( BURN_RATE_TENTHS % 10 ))"
+    projected_pct_tenths=$(( five_hour_pct * 10 +
+        BURN_RATE_TENTHS * (five_hour_reset_epoch - BURN_NOW) / 3600 ))
+    if [ "$projected_pct_tenths" -ge 1000 ]; then
+        burn_color=$red
+    elif [ "$projected_pct_tenths" -ge 900 ]; then
+        burn_color=$yellow
+    fi
 fi
 
 # ── Rate limit lines ────────────────────────────────────
@@ -600,7 +610,7 @@ if [ -n "$five_hour_pct" ]; then
     printf -v five_hour_pct_fmt "%3d" "$five_hour_pct"
 
     rate_lines+="${white}current${reset} ${BAR} ${COLOR}${five_hour_pct_fmt}%${reset}"
-    [ -n "$burn_rate" ] && rate_lines+=" ${dim}${burn_char}${reset} ${white}${burn_rate}%/h${reset}"
+    [ -n "$burn_rate" ] && rate_lines+=" ${burn_color}${burn_char} ${burn_rate}%/h${reset}"
     [ -n "$five_hour_reset" ] && rate_lines+=" ${dim}${reset_char}${reset} ${white}${five_hour_reset}${reset}"
 fi
 

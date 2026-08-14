@@ -143,7 +143,7 @@ payload() {
 
 strip_ansi() { sed $'s/\033\\[[0-9;]*m//g'; }
 
-STDOUT=""; LINE1=""; RAW1=""; STDERR=""; STATUS=0
+STDOUT=""; LINE1=""; RAW=""; RAW1=""; STDERR=""; STATUS=0
 # Renders a payload. Leaves the ANSI-stripped output in $STDOUT, its first line
 # in $LINE1, that same line with colors intact in $RAW1, stderr in $STDERR and
 # the exit code in $STATUS. Extra args are `env` assignments for the run.
@@ -153,6 +153,7 @@ render() {
     # shellcheck disable=SC2034  # part of render()'s output contract, for cases to read.
     STATUS=$?
     STDERR=$(cat "$TMP/stderr")
+    RAW=$raw
     RAW1=$(printf '%s' "$raw" | head -1)
     STDOUT=$(printf '%s' "$raw" | strip_ansi)
     LINE1=$(printf '%s' "$STDOUT" | head -1)
@@ -214,6 +215,14 @@ assert_color() {
     case "$RAW1" in
         *"$2"*) report_pass "$1" ;;
         *) report_fail "$1" "contains $(printf '%q' "$2")" "$(printf '%q' "$RAW1")" ;;
+    esac
+}
+
+assert_output_color() {
+    selected "$1" || return 0
+    case "$RAW" in
+        *"$2"*) report_pass "$1" ;;
+        *) report_fail "$1" "contains $(printf '%q' "$2")" "$(printf '%q' "$RAW")" ;;
     esac
 }
 
@@ -480,6 +489,8 @@ render "$(payload '.rate_limits.five_hour.used_percentage = 50
                     | del(.rate_limits.seven_day)')"
 assert_re "burn rate comes from cached samples in the current window" \
     'current ●●●●●○○○○○  50% ↗ (29\.[0-9]|30\.0)%/h ⟳'
+assert_output_color "a sustainable five-hour pace stays green" \
+    $'\033[38;2;0;175;80m↗ '
 
 render "$(payload '.rate_limits.five_hour.used_percentage = 50
                     | .rate_limits.five_hour.resets_at = '"$BURN_RESET"'
@@ -509,6 +520,21 @@ render "$(payload '.rate_limits.five_hour.used_percentage = 51
                     | .rate_limits.five_hour.resets_at = '"$NEXT_RESET"'
                     | del(.rate_limits.seven_day)')"
 assert_not_re "a reset change starts a fresh burn history" '%/h'
+
+ALERT_RESET=$(( BURN_NOW + 7200 ))
+printf '%s\x1f%s\x1f%s\n' "$ALERT_RESET" "$(( BURN_NOW - 3600 ))" 27 > "$HISTORY_FILE"
+render "$(payload '.rate_limits.five_hour.used_percentage = 50
+                    | .rate_limits.five_hour.resets_at = '"$ALERT_RESET"'
+                    | del(.rate_limits.seven_day)')"
+assert_output_color "a pace projected into the 90-percent zone turns yellow" \
+    $'\033[38;2;230;200;0m↗ '
+
+printf '%s\x1f%s\x1f%s\n' "$ALERT_RESET" "$(( BURN_NOW - 3600 ))" 20 > "$HISTORY_FILE"
+render "$(payload '.rate_limits.five_hour.used_percentage = 50
+                    | .rate_limits.five_hour.resets_at = '"$ALERT_RESET"'
+                    | del(.rate_limits.seven_day)')"
+assert_output_color "a pace projected to exhaust before reset turns red" \
+    $'\033[38;2;255;85;85m↗ '
 
 section "rate limits from the API cache"
 
