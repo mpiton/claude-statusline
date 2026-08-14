@@ -17,11 +17,19 @@ FILTER="${1:-}"
 
 # Most cases exercise the primary Unicode rendering. Pin an installed UTF-8
 # locale so their expectations do not depend on the runner's default locale.
+is_utf8_locale() {
+    case "$(LC_ALL="$1" locale charmap 2>/dev/null)" in
+        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 UTF8_LOCALE=""
 for candidate in $(locale -a 2>/dev/null); do
-    case "$candidate" in
-        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) UTF8_LOCALE=$candidate; break ;;
-    esac
+    if is_utf8_locale "$candidate"; then
+        UTF8_LOCALE=$candidate
+        break
+    fi
 done
 if [ -z "$UTF8_LOCALE" ]; then
     printf 'No UTF-8 locale installed\n' >&2
@@ -680,14 +688,15 @@ if [ -z "$COMMA_LOCALE" ]; then
     skip "no printf warning under a comma-decimal locale" "no comma-decimal locale installed"
 else
     render "$(payload)" LC_ALL="$COMMA_LOCALE"
-    case "$COMMA_LOCALE" in
-        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) comma_output="Opus 5 │ ✍️ 25% │ repo-clean (main)
+    if is_utf8_locale "$COMMA_LOCALE"; then
+        comma_output="Opus 5 │ ✍️ 25% │ repo-clean (main)
 
-$RATES" ;;
-        *) comma_output="Opus 5 | ctx 25% | repo-clean (main)
+$RATES"
+    else
+        comma_output="Opus 5 | ctx 25% | repo-clean (main)
 
-$ASCII_RATES" ;;
-    esac
+$ASCII_RATES"
+    fi
     assert "renders identically under a comma-decimal locale" "$comma_output"
     assert_no_stderr "no printf warning under a comma-decimal locale"
 fi
@@ -702,24 +711,53 @@ assert "a UTF-8 locale keeps Unicode decorations" "Opus 5 │ ✍️ 25% │ rep
 
 $RATES"
 
+render "$(payload)" -u LC_ALL LC_CTYPE="$UTF8_LOCALE" LANG=C
+assert_line1_re "locale selection uses UTF-8 LC_CTYPE when LC_ALL is unset" '^Opus 5 │ ✍️ 25%'
+
+render "$(payload)" -u LC_ALL LC_CTYPE=C LANG="$UTF8_LOCALE"
+assert_line1_re "locale selection uses ASCII LC_CTYPE when LC_ALL is unset" '^Opus 5 \| ctx 25%'
+
+render "$(payload)" -u LC_ALL -u LC_CTYPE LANG="$UTF8_LOCALE"
+assert_line1_re "locale selection uses UTF-8 LANG when stronger variables are unset" '^Opus 5 │ ✍️ 25%'
+
+render "$(payload)" -u LC_ALL -u LC_CTYPE LANG=C
+assert_line1_re "locale selection uses ASCII LANG when stronger variables are unset" '^Opus 5 \| ctx 25%'
+
+render "$(payload)" LC_ALL=C LC_CTYPE="$UTF8_LOCALE" LANG="$UTF8_LOCALE"
+assert_line1_re "locale selection gives LC_ALL precedence" '^Opus 5 \| ctx 25%'
+
 section "permissions"
 
 render "$(payload)"
 assert_line1_re "no bolt without the skip-permissions flag" '│ repo-clean'
 
-BOLT="bolt shows when the parent ran with --dangerously-skip-permissions"
+BOLT="a UTF-8 locale uses ⚡ for the skip-permissions warning"
+ASCII_BOLT="an ASCII locale uses ! for the skip-permissions warning"
 
 # Git Bash ships an MSYS `ps` with no -o flag, so nothing there can read the
 # parent's argv and the bolt never appears.
 if [ -z "$(ps -o args= -p $$ 2>/dev/null)" ]; then
     skip "$BOLT" "ps -o args= unsupported here"
-elif selected "$BOLT"; then
-    out=$(printf '%s' "$(payload)" | bash "$TMP/parent.sh" --dangerously-skip-permissions 2>/dev/null \
-        | strip_ansi | head -1)
-    case "$out" in
-        *"⚡"*) report_pass "$BOLT" ;;
-        *) report_fail "$BOLT" "contains ⚡" "$(printf '%q' "$out")" ;;
-    esac
+    skip "$ASCII_BOLT" "ps -o args= unsupported here"
+else
+    if selected "$BOLT"; then
+        out=$(printf '%s' "$(payload)" \
+            | env LC_ALL="$UTF8_LOCALE" bash "$TMP/parent.sh" --dangerously-skip-permissions 2>/dev/null \
+            | strip_ansi | head -1)
+        case "$out" in
+            *"⚡"*) report_pass "$BOLT" ;;
+            *) report_fail "$BOLT" "contains ⚡" "$(printf '%q' "$out")" ;;
+        esac
+    fi
+    if selected "$ASCII_BOLT"; then
+        out=$(printf '%s' "$(payload)" \
+            | env LC_ALL=C bash "$TMP/parent.sh" --dangerously-skip-permissions 2>/dev/null \
+            | strip_ansi | head -1)
+        case "$out" in
+            *"!  repo-clean"*) report_pass "$ASCII_BOLT" ;;
+            *) report_fail "$ASCII_BOLT" "contains !  repo-clean" "$(printf '%q' "$out")" ;;
+        esac
+    fi
 fi
 
 # ── Summary ─────────────────────────────────────────────

@@ -2,10 +2,9 @@
 # statusline-version: dev
 set -f
 
-# Keep the caller's character encoding before the stable C locale below hides
-# it. Locale names conventionally spell UTF-8 as either "UTF-8" or "UTF8".
-display_locale=${LC_ALL:-${LC_CTYPE:-${LANG:-}}}
-case "$display_locale" in
+# Ask the caller's locale for its character map before the stable C locale
+# below hides it. An unavailable or unknown map safely falls back to ASCII.
+case "$(locale charmap 2>/dev/null)" in
     *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ascii_output=false ;;
     *)                                     ascii_output=true ;;
 esac
