@@ -2,6 +2,13 @@
 # statusline-version: dev
 set -f
 
+# Ask the caller's locale for its character map before the stable C locale
+# below hides it. An unavailable or unknown map safely falls back to ASCII.
+case "$(locale charmap 2>/dev/null)" in
+    *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ascii_output=false ;;
+    *)                                     ascii_output=true ;;
+esac
+
 # Force C locale: `printf %.0f` rejects "42.3" when LC_NUMERIC uses a comma,
 # and `date` emits localized month names with no am/pm designator.
 export LC_ALL=C
@@ -27,7 +34,14 @@ magenta='\033[38;2;180;140;255m'
 dim='\033[2m'
 reset='\033[0m'
 
-sep=" ${dim}│${reset} "
+if $ascii_output; then
+    sep_char="|"; context_char="ctx"; bar_filled="#"; bar_empty="-"; reset_char="reset"; danger_char="!"
+    effort_low="."; effort_medium=":"; effort_high="+"; effort_xhigh="*"; effort_max="!"
+else
+    sep_char="│"; context_char="✍️"; bar_filled="●"; bar_empty="○"; reset_char="⟳"; danger_char="⚡"
+    effort_low="◔"; effort_medium="◑"; effort_high="◕"; effort_xhigh="●"; effort_max="●"
+fi
+sep=" ${dim}${sep_char}${reset} "
 
 months=(jan feb mar apr may jun jul aug sep oct nov dec)
 
@@ -63,8 +77,8 @@ build_bar() {
     local filled=$(( pct * width / 100 ))
     local empty=$(( width - filled ))
     local filled_str="" empty_str=""
-    for ((i=0; i<filled; i++)); do filled_str+="●"; done
-    for ((i=0; i<empty; i++)); do empty_str+="○"; done
+    for ((i=0; i<filled; i++)); do filled_str+="$bar_filled"; done
+    for ((i=0; i<empty; i++)); do empty_str+="$bar_empty"; done
 
     color_for_pct "$pct"
     BAR="${COLOR}${filled_str}${dim}${empty_str}${reset}"
@@ -389,12 +403,12 @@ else
 fi
 skip_perms=""
 case "$parent_cmd" in
-    *--dangerously-skip-permissions*) skip_perms="⚡  " ;;
+    *--dangerously-skip-permissions*) skip_perms="${danger_char}  " ;;
 esac
 
 line1="${blue}${model_name}${reset}"
 line1+="${sep}"
-line1+="✍️ ${pct_color}${pct_used}%${reset}"
+line1+="${context_char} ${pct_color}${pct_used}%${reset}"
 [ "$exceeds_200k" = "true" ] && line1+=" ${red}>200k${reset}"
 line1+="${sep}"
 line1+="${skip_perms}${cyan}${dirname}${reset}"
@@ -414,12 +428,12 @@ fi
 if [ -n "$effort" ]; then
     line1+="${sep}"
     case "$effort" in
-        max)    line1+="${orange}● ${effort}${reset}" ;;
-        xhigh)  line1+="${magenta}● ${effort}${reset}" ;;
-        high)   line1+="${magenta}◕ ${effort}${reset}" ;;
-        medium) line1+="${dim}◑ ${effort}${reset}" ;;
-        low)    line1+="${dim}◔ ${effort}${reset}" ;;
-        *)      line1+="${dim}◑ ${effort}${reset}" ;;
+        max)    line1+="${orange}${effort_max} ${effort}${reset}" ;;
+        xhigh)  line1+="${magenta}${effort_xhigh} ${effort}${reset}" ;;
+        high)   line1+="${magenta}${effort_high} ${effort}${reset}" ;;
+        medium) line1+="${dim}${effort_medium} ${effort}${reset}" ;;
+        low)    line1+="${dim}${effort_low} ${effort}${reset}" ;;
+        *)      line1+="${dim}${effort_medium} ${effort}${reset}" ;;
     esac
 fi
 
@@ -516,7 +530,7 @@ if [ -n "$five_hour_pct" ]; then
     printf -v five_hour_pct_fmt "%3d" "$five_hour_pct"
 
     rate_lines+="${white}current${reset} ${BAR} ${COLOR}${five_hour_pct_fmt}%${reset}"
-    [ -n "$five_hour_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${five_hour_reset}${reset}"
+    [ -n "$five_hour_reset" ] && rate_lines+=" ${dim}${reset_char}${reset} ${white}${five_hour_reset}${reset}"
 fi
 
 if [ -n "$seven_day_pct" ]; then
@@ -527,7 +541,7 @@ if [ -n "$seven_day_pct" ]; then
 
     [ -n "$rate_lines" ] && rate_lines+="\n"
     rate_lines+="${white}weekly${reset}  ${BAR} ${COLOR}${seven_day_pct_fmt}%${reset}"
-    [ -n "$seven_day_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${seven_day_reset}${reset}"
+    [ -n "$seven_day_reset" ] && rate_lines+=" ${dim}${reset_char}${reset} ${white}${seven_day_reset}${reset}"
 fi
 
 if [ "$extra_enabled" = "true" ]; then
@@ -548,7 +562,7 @@ if [ "$extra_enabled" = "true" ]; then
 
     [ -n "$rate_lines" ] && rate_lines+="\n"
     rate_lines+="${white}extra${reset}   ${BAR} ${COLOR}\$${extra_used}${dim}/${reset}${white}\$${extra_limit}${reset}"
-    [ -n "$extra_reset" ] && rate_lines+=" ${dim}⟳${reset} ${white}${extra_reset}${reset}"
+    [ -n "$extra_reset" ] && rate_lines+=" ${dim}${reset_char}${reset} ${white}${extra_reset}${reset}"
 fi
 
 # ── Output ──────────────────────────────────────────────
