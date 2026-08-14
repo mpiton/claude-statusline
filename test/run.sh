@@ -652,16 +652,18 @@ section "locale"
 # Regression: bash printf rejects "42.3" and date drops am/pm under a locale
 # whose decimal separator is a comma, unless the script forces LC_ALL=C.
 COMMA_LOCALE=""
-UTF8_LOCALE=""
 for candidate in $(locale -a 2>/dev/null); do
-    case "$candidate" in
-        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) [ -n "$UTF8_LOCALE" ] || UTF8_LOCALE=$candidate ;;
-        *) continue ;;
-    esac
     if ! LC_ALL="$candidate" printf '%.0f' 42.3 >/dev/null 2>&1; then
         COMMA_LOCALE="$candidate"
         break
     fi
+done
+
+UTF8_LOCALE=""
+for candidate in $(locale -a 2>/dev/null); do
+    case "$candidate" in
+        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) UTF8_LOCALE=$candidate; break ;;
+    esac
 done
 
 if [ -z "$COMMA_LOCALE" ]; then
