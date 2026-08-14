@@ -15,6 +15,20 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 STATUSLINE="$ROOT/bin/statusline.sh"
 FILTER="${1:-}"
 
+# Most cases exercise the primary Unicode rendering. Pin an installed UTF-8
+# locale so their expectations do not depend on the runner's default locale.
+UTF8_LOCALE=""
+for candidate in $(locale -a 2>/dev/null); do
+    case "$candidate" in
+        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) UTF8_LOCALE=$candidate; break ;;
+    esac
+done
+if [ -z "$UTF8_LOCALE" ]; then
+    printf 'No UTF-8 locale installed\n' >&2
+    exit 1
+fi
+export LC_ALL="$UTF8_LOCALE"
+
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -224,6 +238,8 @@ RATES_5H="current ●●●●○○○○○○  42% ⟳ 7:06am"
 RATES_7D="weekly  ●○○○○○○○○○  19% ⟳ aug 10, 10:13pm"
 RATES="$RATES_5H
 $RATES_7D"
+ASCII_RATES="current ####------  42% reset 7:06am
+weekly  #---------  19% reset aug 10, 10:13pm"
 
 # ── Cases ───────────────────────────────────────────────
 
@@ -659,38 +675,32 @@ for candidate in $(locale -a 2>/dev/null); do
     fi
 done
 
-UTF8_LOCALE=""
-for candidate in $(locale -a 2>/dev/null); do
-    case "$candidate" in
-        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) UTF8_LOCALE=$candidate; break ;;
-    esac
-done
-
 if [ -z "$COMMA_LOCALE" ]; then
     skip "renders identically under a comma-decimal locale" "no comma-decimal locale installed"
     skip "no printf warning under a comma-decimal locale" "no comma-decimal locale installed"
 else
     render "$(payload)" LC_ALL="$COMMA_LOCALE"
-    assert "renders identically under a comma-decimal locale" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+    case "$COMMA_LOCALE" in
+        *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) comma_output="Opus 5 │ ✍️ 25% │ repo-clean (main)
 
-$RATES"
+$RATES" ;;
+        *) comma_output="Opus 5 | ctx 25% | repo-clean (main)
+
+$ASCII_RATES" ;;
+    esac
+    assert "renders identically under a comma-decimal locale" "$comma_output"
     assert_no_stderr "no printf warning under a comma-decimal locale"
 fi
 
 render "$(payload '.effort.level = "high"')" LC_ALL=C
 assert "a non-UTF-8 locale uses ASCII decorations" "Opus 5 | ctx 25% | repo-clean (main) | + high
 
-current ####------  42% reset 7:06am
-weekly  #---------  19% reset aug 10, 10:13pm"
+${ASCII_RATES}"
 
-if [ -z "$UTF8_LOCALE" ]; then
-    skip "a UTF-8 locale keeps Unicode decorations" "no UTF-8 locale installed"
-else
-    render "$(payload '.effort.level = "high"')" LC_ALL="$UTF8_LOCALE"
-    assert "a UTF-8 locale keeps Unicode decorations" "Opus 5 │ ✍️ 25% │ repo-clean (main) │ ◕ high
+render "$(payload '.effort.level = "high"')" LC_ALL="$UTF8_LOCALE"
+assert "a UTF-8 locale keeps Unicode decorations" "Opus 5 │ ✍️ 25% │ repo-clean (main) │ ◕ high
 
 $RATES"
-fi
 
 section "permissions"
 
