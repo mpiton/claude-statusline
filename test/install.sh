@@ -11,8 +11,22 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 INSTALLER="$ROOT/bin/install.js"
 FILTER="${1:-}"
 
+TRASH_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+TRASH_FALLBACK="$TRASH_DATA_HOME/Trash/files"
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+discard() {
+    local item target
+    if command -v trash >/dev/null 2>&1 && XDG_DATA_HOME="$TRASH_DATA_HOME" trash "$@"; then
+        return
+    fi
+    mkdir -p "$TRASH_FALLBACK" || return
+    for item in "$@"; do
+        [ -e "$item" ] || continue
+        target="$TRASH_FALLBACK/${item##*/}.$$.${RANDOM}"
+        mv "$item" "$target"
+    done
+}
+trap 'discard "$TMP"' EXIT
 
 # The same sandbox test/run.sh builds. One case runs the installed statusline
 # for real, and with no rate limits on stdin that script goes looking for an

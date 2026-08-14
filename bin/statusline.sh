@@ -4,7 +4,8 @@ set -f
 
 # Ask the caller's locale for its character map before the stable C locale
 # below hides it. An unavailable or unknown map safely falls back to ASCII.
-case "$(locale charmap 2>/dev/null)" in
+display_charmap=$(locale charmap 2>/dev/null)
+case "$display_charmap" in
     *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ascii_output=false ;;
     *)                                     ascii_output=true ;;
 esac
@@ -36,9 +37,11 @@ reset='\033[0m'
 
 if $ascii_output; then
     sep_char="|"; context_char="ctx"; bar_filled="#"; bar_empty="-"; reset_char="reset"; danger_char="!"
+    truncate_char="..."
     effort_low="."; effort_medium=":"; effort_high="+"; effort_xhigh="*"; effort_max="!"
 else
     sep_char="│"; context_char="✍️"; bar_filled="●"; bar_empty="○"; reset_char="⟳"; danger_char="⚡"
+    truncate_char="…"
     effort_low="◔"; effort_medium="◑"; effort_high="◕"; effort_xhigh="●"; effort_max="●"
 fi
 sep=" ${dim}${sep_char}${reset} "
@@ -566,7 +569,63 @@ if [ "$extra_enabled" = "true" ]; then
 fi
 
 # ── Output ──────────────────────────────────────────────
-printf "%b" "$line1"
-[ -n "$rate_lines" ] && printf "\n\n%b" "$rate_lines"
+print_output() {
+    printf "%b" "$line1"
+    [ -n "$rate_lines" ] && printf "\n\n%b" "$rate_lines"
+}
+
+if is_num "${COLUMNS:-}" && [ "$COLUMNS" -gt 0 ]; then
+    # SGR color sequences and combining marks take no terminal columns; CJK and
+    # emoji take two. The final reset prevents a truncated colored block from
+    # bleeding into the terminal.
+    print_output | jq -Rrsj --argjson limit "$COLUMNS" --arg marker "$truncate_char" '
+        def ansi: startswith("\u001b");
+        def cell_width:
+            if test("^[\\p{M}\\p{Cf}]$") then 0
+            else
+                explode[0] as $cp
+                | if (($cp >= 4352 and $cp <= 4447)
+                      or $cp == 9001 or $cp == 9002
+                      or ($cp >= 11904 and $cp <= 42191 and $cp != 12351)
+                      or ($cp >= 44032 and $cp <= 55203)
+                      or ($cp >= 63744 and $cp <= 64255)
+                      or ($cp >= 65040 and $cp <= 65049)
+                      or ($cp >= 65072 and $cp <= 65135)
+                      or ($cp >= 65280 and $cp <= 65376)
+                      or ($cp >= 65504 and $cp <= 65510)
+                      or ($cp >= 9728 and $cp <= 10175)
+                      or ($cp >= 127744 and $cp <= 129791)
+                      or ($cp >= 131072 and $cp <= 262141))
+                  then 2 else 1 end
+            end;
+        def width:
+            map(if ansi then 0 else cell_width end) | add // 0;
+        def take_cells($max):
+            reduce .[] as $token (
+                {text: "", width: 0, cut: false};
+                if .cut then .
+                elif ($token | ansi) then .text += $token
+                else ($token | cell_width) as $width
+                     | if .width + $width <= $max then
+                           .text += $token | .width += $width
+                       else .cut = true end
+                end
+            ) | .text;
+        def truncate:
+            [scan("\u001b\\[[0-9;]*m|.")] as $tokens
+            | ($tokens | width) as $visible
+            | if $visible <= $limit then .
+              else
+                  ([ $marker | scan(".") ] | take_cells($limit)) as $suffix
+                  | ([ $suffix | scan(".") ] | width) as $suffix_width
+                  | ($tokens | take_cells($limit - $suffix_width))
+                    + $suffix + "\u001b[0m"
+              end;
+
+        split("\n") | map(truncate) | join("\n")
+    '
+else
+    print_output
+fi
 
 exit 0

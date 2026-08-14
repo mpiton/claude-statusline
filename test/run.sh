@@ -37,8 +37,22 @@ if [ -z "$UTF8_LOCALE" ]; then
 fi
 export LC_ALL="$UTF8_LOCALE"
 
+TRASH_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+TRASH_FALLBACK="$TRASH_DATA_HOME/Trash/files"
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+discard() {
+    local item target
+    if command -v trash >/dev/null 2>&1 && XDG_DATA_HOME="$TRASH_DATA_HOME" trash "$@"; then
+        return
+    fi
+    mkdir -p "$TRASH_FALLBACK" || return
+    for item in "$@"; do
+        [ -e "$item" ] || continue
+        target="$TRASH_FALLBACK/${item##*/}.$$.${RANDOM}"
+        mv "$item" "$target"
+    done
+}
+trap 'discard "$TMP"' EXIT
 
 export TZ=UTC
 unset CLAUDE_CODE_OAUTH_TOKEN GIT_DIR GIT_WORK_TREE XDG_CACHE_HOME
@@ -345,6 +359,22 @@ rm -f "$DIRTY_CACHE"
 render "$(payload 'del(.model)')"
 assert_line1_re "missing model falls back to Claude" '^Claude │'
 
+section "width"
+
+clear_cache
+render "$(payload 'del(.rate_limits) | .model.display_name = "1234567890123456789012345"')" COLUMNS=20
+assert "COLUMNS truncates a Unicode line by visible width" "1234567890123456789…"
+
+render "$(payload 'del(.rate_limits) | .model.display_name = "1234567890123456789012345"')" \
+    COLUMNS=10 LC_ALL=C
+assert "COLUMNS uses an ASCII marker outside UTF-8" "1234567..."
+
+render "$(payload 'del(.rate_limits) | .model.display_name = "界界界界"')" COLUMNS=6
+assert "COLUMNS counts CJK characters as two cells" "界界…"
+
+render "$(payload 'del(.rate_limits) | .model.display_name = "e\u0301e\u0301e\u0301"')" COLUMNS=3
+assert "COLUMNS does not count combining marks twice" "éé…"
+
 section "context window"
 
 render "$(payload '.context_window.current_usage.cache_read_input_tokens = 196000')"
@@ -573,7 +603,7 @@ section "cache directory"
 # Both defaults are derived rather than passed in, so these cases drop the
 # override the rest of the suite runs with.
 DEFAULT_CACHE_DIR="$HOME/.cache/claude-statusline"
-rm -rf "$HOME/.cache"
+[ ! -e "$HOME/.cache" ] || discard "$HOME/.cache"
 render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR
 assert_dir "the cache lands under \$HOME/.cache by default" "$DEFAULT_CACHE_DIR"
 
@@ -599,7 +629,7 @@ else
     skip "$NONPRIVATE" "no POSIX modes on this filesystem"
 fi
 
-rm -rf "$TMP/xdg"
+[ ! -e "$TMP/xdg" ] || discard "$TMP/xdg"
 render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR XDG_CACHE_HOME="$TMP/xdg"
 assert_dir "XDG_CACHE_HOME moves it" "$TMP/xdg/claude-statusline"
 
