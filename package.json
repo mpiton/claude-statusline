@@ -1,5 +1,5 @@
 {
-  "name": "claude-line",
+  "name": "@mpiton/claude-line",
   "version": "2.0.0",
   "description": "A status line for Claude Code CLI showing model, context usage, rate limits, and more",
   "bin": {

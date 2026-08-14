@@ -11,7 +11,7 @@ Configure your Claude Code statusline to show limits, directory and git info
 Run the command below to set it up
 
 ```bash
-npx claude-line
+npx @mpiton/claude-line
 ```
 
 It backs up your old status line if any, copies the status line script to
@@ -107,7 +107,7 @@ Both take a filter argument. CI runs shellcheck, then the full suite on Linux, m
 ## Uninstall
 
 ```bash
-npx claude-line --uninstall
+npx @mpiton/claude-line --uninstall
 ```
 
 If you had a previous statusline, it restores it from the backup. Otherwise it
