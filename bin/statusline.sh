@@ -4,7 +4,8 @@ set -f
 
 # Ask the caller's locale for its character map before the stable C locale
 # below hides it. An unavailable or unknown map safely falls back to ASCII.
-case "$(locale charmap 2>/dev/null)" in
+display_charmap=$(locale charmap 2>/dev/null)
+case "$display_charmap" in
     *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ascii_output=false ;;
     *)                                     ascii_output=true ;;
 esac
@@ -34,11 +35,72 @@ magenta='\033[38;2;180;140;255m'
 dim='\033[2m'
 reset='\033[0m'
 
+# ── Configuration ───────────────────────────────────────
+blocks="model,context,directory,cost,changes,style,effort,current,burn,weekly,extra"
+bar_width=10
+config_file="${CLAUDE_STATUSLINE_CONFIG:-$HOME/.claude/statusline.json}"
+
+if [ -f "$config_file" ]; then
+    config_fields=$(jq -r '
+        def known_block:
+            . == "model" or . == "context" or . == "directory"
+            or . == "cost" or . == "changes" or . == "style"
+            or . == "effort" or . == "current" or . == "burn"
+            or . == "weekly" or . == "extra";
+        def color: strings | select(test("^#[0-9A-Fa-f]{6}$"));
+
+        . as $config
+        | (($config.colors // {}) | if type == "object" then . else {} end) as $colors
+        | [
+            (if ($config.blocks | type) == "array" then
+                 "set:" + ([$config.blocks[] | strings | select(known_block)] | unique | join(","))
+             else "" end),
+            (($config.bar_width | numbers | select(. == floor and . >= 1 and . <= 40)) // ""),
+            (($colors.blue | color) // ""),
+            (($colors.orange | color) // ""),
+            (($colors.green | color) // ""),
+            (($colors.cyan | color) // ""),
+            (($colors.red | color) // ""),
+            (($colors.yellow | color) // ""),
+            (($colors.white | color) // ""),
+            (($colors.magenta | color) // "")
+        ] | map(tostring) | join("\u001f")
+    ' "$config_file" 2>/dev/null)
+
+    if [ -n "$config_fields" ]; then
+        IFS=$'\x1f' read -r config_blocks config_bar_width \
+            config_blue config_orange config_green config_cyan \
+            config_red config_yellow config_white config_magenta <<< "$config_fields"
+        case "$config_blocks" in set:*) blocks=${config_blocks#set:} ;; esac
+        [ -n "$config_bar_width" ] && bar_width=$config_bar_width
+
+        set_color() {
+            local name=$1 hex=${2#\#}
+            printf -v "$name" '\033[38;2;%d;%d;%dm' \
+                "$(( 16#${hex:0:2} ))" "$(( 16#${hex:2:2} ))" "$(( 16#${hex:4:2} ))"
+        }
+        [ -n "$config_blue" ] && set_color blue "$config_blue"
+        [ -n "$config_orange" ] && set_color orange "$config_orange"
+        [ -n "$config_green" ] && set_color green "$config_green"
+        [ -n "$config_cyan" ] && set_color cyan "$config_cyan"
+        [ -n "$config_red" ] && set_color red "$config_red"
+        [ -n "$config_yellow" ] && set_color yellow "$config_yellow"
+        [ -n "$config_white" ] && set_color white "$config_white"
+        [ -n "$config_magenta" ] && set_color magenta "$config_magenta"
+    fi
+fi
+
+block_enabled() {
+    case ",$blocks," in *",$1,"*) return 0 ;; *) return 1 ;; esac
+}
+
 if $ascii_output; then
     sep_char="|"; context_char="ctx"; bar_filled="#"; bar_empty="-"; reset_char="reset"; danger_char="!"
+    truncate_char="..."; burn_char="burn"
     effort_low="."; effort_medium=":"; effort_high="+"; effort_xhigh="*"; effort_max="!"
 else
     sep_char="│"; context_char="✍️"; bar_filled="●"; bar_empty="○"; reset_char="⟳"; danger_char="⚡"
+    truncate_char="…"; burn_char="↗"
     effort_low="◔"; effort_medium="◑"; effort_high="◕"; effort_xhigh="●"; effort_max="●"
 fi
 sep=" ${dim}${sep_char}${reset} "
@@ -204,6 +266,65 @@ cache_is_fresh() {
     [ "$(( now - mtime ))" -lt "$max_age" ]
 }
 
+# update_burn_history <pct> <reset-epoch> → $BURN_RATE_TENTHS and $BURN_NOW.
+# Samples are minute-spaced, tied to one reset window and capped at five hours.
+# A utilization drop starts a new series instead of reporting a negative rate.
+update_burn_history() {
+    local pct=$1 reset_epoch=$2 now history_source history_tmp result
+    BURN_RATE_TENTHS=""
+    BURN_NOW=""
+
+    is_num "$pct" && [ "$pct" -le 100 ] || return
+    is_num "$reset_epoch" || return
+    now=$(date +%s 2>/dev/null)
+    is_num "$now" || return
+    [ "$reset_epoch" -gt "$now" ] && [ "$(( reset_epoch - now ))" -le 21600 ] || return
+    cache_writable "$history_cache" || return
+
+    history_source=/dev/null
+    cache_readable "$history_cache" && history_source=$history_cache
+    history_tmp=$(mktemp "$cache_dir/.statusline-history.XXXXXX" 2>/dev/null) || return
+
+    result=$(awk -v reset_epoch="$reset_epoch" -v now="$now" -v pct="$pct" \
+        -v out="$history_tmp" '
+        BEGIN { FS = OFS = sprintf("%c", 31) }
+        function integer(value) { return value ~ /^[0-9]+$/ }
+        $1 == reset_epoch && integer($2) && integer($3) &&
+        $2 >= now - 18000 && $2 <= now && $3 <= 100 {
+            if (n == 0 || $2 >= sample_time[n]) {
+                n++
+                sample_time[n] = $2
+                sample_pct[n] = $3
+            }
+        }
+        END {
+            if (n > 0 && pct < sample_pct[n]) n = 0
+            if (n == 0 || now - sample_time[n] >= 60) {
+                n++
+                sample_time[n] = now
+                sample_pct[n] = pct
+            }
+
+            first = n > 301 ? n - 300 : 1
+            for (i = first; i <= n; i++)
+                print reset_epoch, sample_time[i], sample_pct[i] > out
+            close(out)
+
+            elapsed = now - sample_time[first]
+            delta = pct - sample_pct[first]
+            if (elapsed >= 60 && delta >= 0)
+                printf "%d", int(delta * 36000 / elapsed + 0.5)
+        }
+    ' "$history_source" 2>/dev/null)
+
+    if mv -f "$history_tmp" "$history_cache" 2>/dev/null; then
+        is_num "$result" && BURN_RATE_TENTHS=$result
+        BURN_NOW=$now
+    else
+        rm -f "$history_tmp"
+    fi
+}
+
 # Fetches the usage payload into $USAGE_RESPONSE and warms the shared cache.
 # The stdin-rates path runs this in the background; its current render keeps
 # using stdin and the next render gets the extra-usage data written here.
@@ -301,7 +422,7 @@ pct_used=$(( current * 100 / size ))
 
 # Live session effort comes from stdin and follows /effort. settings.json is a
 # fallback for CLI versions that don't emit `.effort`, and goes stale otherwise.
-if [ -z "$effort" ]; then
+if block_enabled effort && [ -z "$effort" ]; then
     settings_path="$HOME/.claude/settings.json"
     if [ -f "$settings_path" ]; then
         effort=$(jq -r '.effortLevel // empty' "$settings_path" 2>/dev/null)
@@ -340,101 +461,113 @@ fi
 if $cache_dir_private; then
     cache_file="$cache_dir/statusline-usage-cache.json"
     dirty_cache="$cache_dir/statusline-dirty-cache"
+    history_cache="$cache_dir/statusline-usage-history"
 else
     cache_file=""
     dirty_cache=""
+    history_cache=""
 fi
 
 # ── LINE 1: Model │ Context % │ Directory (branch) │ Effort ──
-color_for_pct "$pct_used"
-pct_color=$COLOR
+line1=""
+append_line1() {
+    [ -n "$line1" ] && line1+="$sep"
+    line1+="$1"
+}
 
-case "$cwd" in ''|null) cwd=$PWD ;; esac
-dirname=${cwd%/}
-dirname=${dirname##*/}
-[ -n "$dirname" ] || dirname=/
+block_enabled model && append_line1 "${blue}${model_name}${reset}"
 
-# `symbolic-ref` already fails outside a work tree, so the separate
-# `rev-parse --is-inside-work-tree` probe was a fork spent on a question its
-# answer covers. A detached HEAD prints no branch either way.
-git_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
-git_dirty=""
-if [ -n "$git_branch" ]; then
-    # `status --porcelain` walks the whole worktree; on a large repo that is
-    # most of the render. The answer is worth reusing for a couple of seconds —
-    # long enough to skip the walk between two turns, short enough that a star
-    # never looks stuck. $EPOCHSECONDS is bash 5 and macOS ships 3.2, so
-    # without a free clock the walk just runs, rather than forking `date` to
-    # decide whether to fork `git`.
-    now_s=${EPOCHSECONDS:-}
-    dirty_hit=""
-    if [ -n "$now_s" ] && cache_readable "$dirty_cache"; then
-        # The entry is written without a trailing newline, so `read` reports EOF
-        # and returns non-zero even though it filled the fields.
-        IFS=$'\x1f' read -r cached_expiry cached_dirty cached_cwd < "$dirty_cache"
-        # Keyed on the directory: a stale entry from another cwd is a miss, not a
-        # wrong star. A path the caller spells differently misses too, which
-        # costs one worktree walk and stays correct.
-        if [ "$cached_cwd" = "$cwd" ] && is_num "$cached_expiry" && [ "$now_s" -lt "$cached_expiry" ]; then
-            dirty_hit=yes
-            git_dirty=$cached_dirty
+if block_enabled context; then
+    color_for_pct "$pct_used"
+    context_block="${context_char} ${COLOR}${pct_used}%${reset}"
+    [ "$exceeds_200k" = "true" ] && context_block+=" ${red}>200k${reset}"
+    append_line1 "$context_block"
+fi
+
+if block_enabled directory; then
+    case "$cwd" in ''|null) cwd=$PWD ;; esac
+    dirname=${cwd%/}
+    dirname=${dirname##*/}
+    [ -n "$dirname" ] || dirname=/
+
+    # `symbolic-ref` already fails outside a work tree, so the separate
+    # `rev-parse --is-inside-work-tree` probe was a fork spent on a question its
+    # answer covers. A detached HEAD prints no branch either way.
+    git_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null)
+    git_dirty=""
+    if [ -n "$git_branch" ]; then
+        # `status --porcelain` walks the whole worktree; on a large repo that is
+        # most of the render. The answer is worth reusing for a couple of seconds —
+        # long enough to skip the walk between two turns, short enough that a star
+        # never looks stuck. $EPOCHSECONDS is bash 5 and macOS ships 3.2, so
+        # without a free clock the walk just runs, rather than forking `date` to
+        # decide whether to fork `git`.
+        now_s=${EPOCHSECONDS:-}
+        dirty_hit=""
+        if [ -n "$now_s" ] && cache_readable "$dirty_cache"; then
+            # The entry has no trailing newline, so `read` fills the fields and
+            # returns non-zero at EOF.
+            IFS=$'\x1f' read -r cached_expiry cached_dirty cached_cwd < "$dirty_cache"
+            # A stale entry from another directory is a miss, not a wrong star.
+            if [ "$cached_cwd" = "$cwd" ] && is_num "$cached_expiry" &&
+               [ "$now_s" -lt "$cached_expiry" ]; then
+                dirty_hit=yes
+                git_dirty=$cached_dirty
+            fi
+        fi
+        if [ -z "$dirty_hit" ]; then
+            if [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)" ]; then
+                git_dirty="*"
+            fi
+            if [ -n "$now_s" ] && cache_writable "$dirty_cache"; then
+                printf '%s\x1f%s\x1f%s' "$(( now_s + 2 ))" "$git_dirty" "$cwd" \
+                    > "$dirty_cache" 2>/dev/null
+            fi
         fi
     fi
-    if [ -z "$dirty_hit" ]; then
-        if [ -n "$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)" ]; then
-            git_dirty="*"
-        fi
-        if [ -n "$now_s" ] && cache_writable "$dirty_cache"; then
-            printf '%s\x1f%s\x1f%s' "$(( now_s + 2 ))" "$git_dirty" "$cwd" \
-                > "$dirty_cache" 2>/dev/null
-        fi
+
+    # /proc/PID/cmdline is NUL-separated argv and costs no fork to read; `ps` is
+    # the fallback for macOS and Git Bash.
+    parent_cmd=""
+    if [ -r "/proc/$PPID/cmdline" ]; then
+        while IFS= read -r -d '' parent_arg; do
+            parent_cmd+=" $parent_arg"
+        done < "/proc/$PPID/cmdline"
+    else
+        parent_cmd=$(ps -o args= -p "$PPID" 2>/dev/null)
     fi
-fi
-
-# /proc/PID/cmdline is NUL-separated argv and costs no fork to read; `ps` is
-# the fallback for macOS and Git Bash.
-parent_cmd=""
-if [ -r "/proc/$PPID/cmdline" ]; then
-    while IFS= read -r -d '' parent_arg; do
-        parent_cmd+=" $parent_arg"
-    done < "/proc/$PPID/cmdline"
-else
-    parent_cmd=$(ps -o args= -p "$PPID" 2>/dev/null)
-fi
-skip_perms=""
-case "$parent_cmd" in
-    *--dangerously-skip-permissions*) skip_perms="${danger_char}  " ;;
-esac
-
-line1="${blue}${model_name}${reset}"
-line1+="${sep}"
-line1+="${context_char} ${pct_color}${pct_used}%${reset}"
-[ "$exceeds_200k" = "true" ] && line1+=" ${red}>200k${reset}"
-line1+="${sep}"
-line1+="${skip_perms}${cyan}${dirname}${reset}"
-if [ -n "$git_branch" ]; then
-    line1+=" ${green}(${git_branch}${red}${git_dirty}${green})${reset}"
-fi
-if [ -n "$total_cost_usd" ]; then
-    printf -v total_cost_fmt "%.2f" "$total_cost_usd"
-    line1+="${sep}${white}\$${total_cost_fmt}${reset}"
-fi
-if [ "$total_lines_added" -gt 0 ] || [ "$total_lines_removed" -gt 0 ]; then
-    line1+="${sep}${green}+${total_lines_added}${reset}${dim}/${reset}${red}-${total_lines_removed}${reset}"
-fi
-if [ -n "$output_style" ]; then
-    line1+="${sep}${dim}style:${reset}${white}${output_style}${reset}"
-fi
-if [ -n "$effort" ]; then
-    line1+="${sep}"
-    case "$effort" in
-        max)    line1+="${orange}${effort_max} ${effort}${reset}" ;;
-        xhigh)  line1+="${magenta}${effort_xhigh} ${effort}${reset}" ;;
-        high)   line1+="${magenta}${effort_high} ${effort}${reset}" ;;
-        medium) line1+="${dim}${effort_medium} ${effort}${reset}" ;;
-        low)    line1+="${dim}${effort_low} ${effort}${reset}" ;;
-        *)      line1+="${dim}${effort_medium} ${effort}${reset}" ;;
+    skip_perms=""
+    case "$parent_cmd" in
+        *--dangerously-skip-permissions*) skip_perms="${danger_char}  " ;;
     esac
+
+    directory_block="${skip_perms}${cyan}${dirname}${reset}"
+    [ -n "$git_branch" ] &&
+        directory_block+=" ${green}(${git_branch}${red}${git_dirty}${green})${reset}"
+    append_line1 "$directory_block"
+fi
+
+if block_enabled cost && [ -n "$total_cost_usd" ]; then
+    printf -v total_cost_fmt "%.2f" "$total_cost_usd"
+    append_line1 "${white}\$${total_cost_fmt}${reset}"
+fi
+if block_enabled changes &&
+   { [ "$total_lines_added" -gt 0 ] || [ "$total_lines_removed" -gt 0 ]; }; then
+    append_line1 "${green}+${total_lines_added}${reset}${dim}/${reset}${red}-${total_lines_removed}${reset}"
+fi
+block_enabled style && [ -n "$output_style" ] &&
+    append_line1 "${dim}style:${reset}${white}${output_style}${reset}"
+
+if block_enabled effort && [ -n "$effort" ]; then
+    case "$effort" in
+        max)    effort_block="${orange}${effort_max} ${effort}${reset}" ;;
+        xhigh)  effort_block="${magenta}${effort_xhigh} ${effort}${reset}" ;;
+        high)   effort_block="${magenta}${effort_high} ${effort}${reset}" ;;
+        medium) effort_block="${dim}${effort_medium} ${effort}${reset}" ;;
+        low)    effort_block="${dim}${effort_low} ${effort}${reset}" ;;
+        *)      effort_block="${dim}${effort_medium} ${effort}${reset}" ;;
+    esac
+    append_line1 "$effort_block"
 fi
 
 # ── Rate limits from stdin (primary) ───────────────────
@@ -458,8 +591,16 @@ fi
 usage_data=""
 usage_stale=false
 extra_enabled="false"
+usage_requested=false
+extra_requested=false
+rate_blocks_requested=false
+block_enabled extra && extra_requested=true
+if block_enabled current || block_enabled weekly; then rate_blocks_requested=true; fi
+if $extra_requested || { ! $has_stdin_rates && $rate_blocks_requested; }; then
+    usage_requested=true
+fi
 
-if ! $has_stdin_rates; then
+if $usage_requested && ! $has_stdin_rates; then
     needs_refresh=true
 
     if cache_is_fresh "$cache_file"; then
@@ -479,11 +620,11 @@ if ! $has_stdin_rates; then
             usage_stale=true
         fi
     fi
-elif cache_is_fresh "$cache_file" "$extra_cache_max_age"; then
+elif $extra_requested && cache_is_fresh "$cache_file" "$extra_cache_max_age"; then
     # stdin already carried the rate limits; the cache is only still worth
     # reading for the extra-usage block, which stdin does not report.
     usage_data=$(<"$cache_file")
-elif cache_writable "$cache_file"; then
+elif $extra_requested && cache_writable "$cache_file"; then
     refresh_usage_cache </dev/null >/dev/null 2>&1 &
 fi
 
@@ -519,21 +660,41 @@ if [ -n "$usage_data" ]; then
     fi
 fi
 
+# The five-hour reset identifies the active window. One sample is not a rate;
+# the indicator appears after at least a minute of history has accumulated.
+BURN_RATE_TENTHS=""
+if block_enabled current && block_enabled burn; then
+    update_burn_history "$five_hour_pct" "$five_hour_reset_epoch"
+fi
+burn_rate=""
+burn_color=$green
+if is_num "$BURN_RATE_TENTHS"; then
+    printf -v burn_rate "%d.%d" "$(( BURN_RATE_TENTHS / 10 ))" "$(( BURN_RATE_TENTHS % 10 ))"
+    projected_pct_tenths=$(( five_hour_pct * 10 +
+        BURN_RATE_TENTHS * (five_hour_reset_epoch - BURN_NOW) / 3600 ))
+    if [ "$projected_pct_tenths" -ge 1000 ]; then
+        burn_color=$red
+    elif [ "$projected_pct_tenths" -ge 900 ]; then
+        burn_color=$yellow
+    fi
+fi
+
 # ── Rate limit lines ────────────────────────────────────
 rate_lines=""
-bar_width=10
 
-if [ -n "$five_hour_pct" ]; then
+if block_enabled current && [ -n "$five_hour_pct" ]; then
     format_epoch_time "$five_hour_reset_epoch" "time"
     five_hour_reset=$FMT_TIME
     build_bar "$five_hour_pct" "$bar_width"
     printf -v five_hour_pct_fmt "%3d" "$five_hour_pct"
 
     rate_lines+="${white}current${reset} ${BAR} ${COLOR}${five_hour_pct_fmt}%${reset}"
+    block_enabled burn && [ -n "$burn_rate" ] &&
+        rate_lines+=" ${burn_color}${burn_char} ${burn_rate}%/h${reset}"
     [ -n "$five_hour_reset" ] && rate_lines+=" ${dim}${reset_char}${reset} ${white}${five_hour_reset}${reset}"
 fi
 
-if [ -n "$seven_day_pct" ]; then
+if block_enabled weekly && [ -n "$seven_day_pct" ]; then
     format_epoch_time "$seven_day_reset_epoch" "datetime"
     seven_day_reset=$FMT_TIME
     build_bar "$seven_day_pct" "$bar_width"
@@ -544,7 +705,7 @@ if [ -n "$seven_day_pct" ]; then
     [ -n "$seven_day_reset" ] && rate_lines+=" ${dim}${reset_char}${reset} ${white}${seven_day_reset}${reset}"
 fi
 
-if [ "$extra_enabled" = "true" ]; then
+if block_enabled extra && [ "$extra_enabled" = "true" ]; then
     printf -v extra_pct "%.0f" "$api_extra_pct"
     printf -v extra_used "%.2f" "$api_extra_used"
     printf -v extra_limit "%.2f" "$api_extra_limit"
@@ -566,7 +727,72 @@ if [ "$extra_enabled" = "true" ]; then
 fi
 
 # ── Output ──────────────────────────────────────────────
-printf "%b" "$line1"
-[ -n "$rate_lines" ] && printf "\n\n%b" "$rate_lines"
+print_output() {
+    [ -n "$line1" ] && printf "%b" "$line1"
+    if [ -n "$rate_lines" ]; then
+        [ -n "$line1" ] && printf "\n\n"
+        printf "%b" "$rate_lines"
+    fi
+}
+
+if is_num "${COLUMNS:-}" && [ "$COLUMNS" -gt 0 ]; then
+    # SGR color sequences and combining marks take no terminal columns; CJK and
+    # emoji take two. The final reset prevents a truncated colored block from
+    # bleeding into the terminal.
+    output=$(print_output)
+    truncated=$(printf "%s" "$output" | jq -Rrsj --argjson limit "$COLUMNS" --arg marker "$truncate_char" '
+        def ansi: startswith("\u001b");
+        def cell_width:
+            if test("^[\\p{M}\\p{Cf}]$") then 0
+            else
+                explode[0] as $cp
+                | if (($cp >= 4352 and $cp <= 4447)
+                      or $cp == 9001 or $cp == 9002
+                      or ($cp >= 11904 and $cp <= 42191 and $cp != 12351)
+                      or ($cp >= 44032 and $cp <= 55203)
+                      or ($cp >= 63744 and $cp <= 64255)
+                      or ($cp >= 65040 and $cp <= 65049)
+                      or ($cp >= 65072 and $cp <= 65135)
+                      or ($cp >= 65280 and $cp <= 65376)
+                      or ($cp >= 65504 and $cp <= 65510)
+                      or ($cp >= 9728 and $cp <= 10175)
+                      or ($cp >= 127744 and $cp <= 129791)
+                      or ($cp >= 131072 and $cp <= 262141))
+                  then 2 else 1 end
+            end;
+        def width:
+            map(if ansi then 0 else cell_width end) | add // 0;
+        def take_cells($max):
+            reduce .[] as $token (
+                {text: "", width: 0, cut: false};
+                if .cut then .
+                elif ($token | ansi) then .text += $token
+                else ($token | cell_width) as $width
+                     | if .width + $width <= $max then
+                           .text += $token | .width += $width
+                       else .cut = true end
+                end
+            ) | .text;
+        def truncate:
+            [scan("\u001b\\[[0-9;]*m|.")] as $tokens
+            | ($tokens | width) as $visible
+            | if $visible <= $limit then .
+              else
+                  ([ $marker | scan(".") ] | take_cells($limit)) as $suffix
+                  | ([ $suffix | scan(".") ] | width) as $suffix_width
+                  | ($tokens | take_cells($limit - $suffix_width))
+                    + $suffix + "\u001b[0m"
+              end;
+
+        split("\n") | map(truncate) | join("\n")
+    ') || truncated=""
+    if [ -n "$truncated" ] || [ -z "$output" ]; then
+        printf "%s" "$truncated"
+    else
+        printf "%s" "$output"
+    fi
+else
+    print_output
+fi
 
 exit 0

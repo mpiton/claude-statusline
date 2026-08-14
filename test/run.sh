@@ -37,8 +37,15 @@ if [ -z "$UTF8_LOCALE" ]; then
 fi
 export LC_ALL="$UTF8_LOCALE"
 
+TRASH_HOME=$HOME
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
+discard() {
+    if command -v trash >/dev/null 2>&1; then
+        HOME="$TRASH_HOME" trash "$@" || :
+    fi
+    # ponytail: without trash, leave mktemp-owned paths to OS temp cleanup.
+}
+trap 'discard "$TMP"' EXIT
 
 export TZ=UTC
 unset CLAUDE_CODE_OAUTH_TOKEN GIT_DIR GIT_WORK_TREE XDG_CACHE_HOME
@@ -55,6 +62,7 @@ export STATUSLINE_TEST_POLL_ATTEMPTS=600 STATUSLINE_TEST_POLL_DELAY=0.05
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/bin/bash
+[ -n "${STUB_CURL_CALLED:-}" ] && : > "$STUB_CURL_CALLED"
 if [ -n "${STUB_CURL_GATE:-}" ]; then
     [ -n "${STUB_CURL_WAITING:-}" ] && : > "$STUB_CURL_WAITING"
     for ((i=0; i<STATUSLINE_TEST_POLL_ATTEMPTS; i++)); do
@@ -81,10 +89,12 @@ export PATH="$TMP/bin:$PATH"
 export HOME="$TMP/home"
 mkdir -p "$HOME/.claude"
 echo '{}' > "$HOME/.claude/settings.json"
+CONFIG_FILE="$HOME/.claude/statusline.json"
 
 export CLAUDE_STATUSLINE_CACHE_DIR="$TMP/cache"
 mkdir -m 700 "$CLAUDE_STATUSLINE_CACHE_DIR"
 CACHE_FILE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-usage-cache.json"
+HISTORY_FILE="$CLAUDE_STATUSLINE_CACHE_DIR/statusline-usage-history"
 
 REPO_CLEAN="$TMP/repo-clean"
 REPO_DIRTY="$TMP/repo-dirty"
@@ -128,7 +138,7 @@ payload() {
 
 strip_ansi() { sed $'s/\033\\[[0-9;]*m//g'; }
 
-STDOUT=""; LINE1=""; RAW1=""; STDERR=""; STATUS=0
+STDOUT=""; LINE1=""; RAW=""; RAW1=""; STDERR=""; STATUS=0
 # Renders a payload. Leaves the ANSI-stripped output in $STDOUT, its first line
 # in $LINE1, that same line with colors intact in $RAW1, stderr in $STDERR and
 # the exit code in $STATUS. Extra args are `env` assignments for the run.
@@ -138,6 +148,7 @@ render() {
     # shellcheck disable=SC2034  # part of render()'s output contract, for cases to read.
     STATUS=$?
     STDERR=$(cat "$TMP/stderr")
+    RAW=$raw
     RAW1=$(printf '%s' "$raw" | head -1)
     STDOUT=$(printf '%s' "$raw" | strip_ansi)
     LINE1=$(printf '%s' "$STDOUT" | head -1)
@@ -180,6 +191,11 @@ assert_re() {
     if [[ "$STDOUT" =~ $2 ]]; then report_pass "$1"; else report_fail "$1" "=~ $2" "$(printf '%q' "$STDOUT")"; fi
 }
 
+assert_not_re() {
+    selected "$1" || return 0
+    if [[ ! "$STDOUT" =~ $2 ]]; then report_pass "$1"; else report_fail "$1" "!~ $2" "$(printf '%q' "$STDOUT")"; fi
+}
+
 # Line-1 variants. `$` in a bash regex anchors the end of the whole string, so
 # matching a trailing segment of the first line needs that line on its own.
 assert_line1_re() {
@@ -194,6 +210,14 @@ assert_color() {
     case "$RAW1" in
         *"$2"*) report_pass "$1" ;;
         *) report_fail "$1" "contains $(printf '%q' "$2")" "$(printf '%q' "$RAW1")" ;;
+    esac
+}
+
+assert_output_color() {
+    selected "$1" || return 0
+    case "$RAW" in
+        *"$2"*) report_pass "$1" ;;
+        *) report_fail "$1" "contains $(printf '%q' "$2")" "$(printf '%q' "$RAW")" ;;
     esac
 }
 
@@ -345,6 +369,80 @@ rm -f "$DIRTY_CACHE"
 render "$(payload 'del(.model)')"
 assert_line1_re "missing model falls back to Claude" '^Claude │'
 
+section "width"
+
+clear_cache
+render "$(payload 'del(.rate_limits) | .model.display_name = "1234567890123456789012345"')" COLUMNS=20
+assert "COLUMNS truncates a Unicode line by visible width" "1234567890123456789…"
+
+render "$(payload 'del(.rate_limits) | .model.display_name = "1234567890123456789012345"')" \
+    COLUMNS=10 LC_ALL=C
+assert "COLUMNS uses an ASCII marker outside UTF-8" "1234567..."
+
+render "$(payload 'del(.rate_limits) | .model.display_name = "界界界界"')" COLUMNS=6
+assert "COLUMNS counts CJK characters as two cells" "界界…"
+
+render "$(payload 'del(.rate_limits) | .model.display_name = "e\u0301e\u0301e\u0301"')" COLUMNS=3
+assert "COLUMNS does not count combining marks twice" "éé…"
+
+REAL_JQ=$(command -v jq)
+mkdir -p "$TMP/failing-jq"
+cat > "$TMP/failing-jq/jq" <<EOF
+#!/bin/bash
+[ "\${1:-}" = "-Rrsj" ] && exit 1
+exec "$REAL_JQ" "\$@"
+EOF
+chmod +x "$TMP/failing-jq/jq"
+render "$(payload 'del(.rate_limits) | .model.display_name = "1234567890123456789012345"')" \
+    COLUMNS=20 PATH="$TMP/failing-jq:$PATH"
+assert "COLUMNS keeps the original output when truncation fails" \
+    "1234567890123456789012345 │ ✍️ 25% │ repo-clean (main)"
+
+section "configuration"
+
+printf '{"blocks":["model","current"],"bar_width":4}\n' > "$CONFIG_FILE"
+clear_cache
+render "$(payload)"
+assert "config selects blocks and bar width" "Opus 5
+
+current ●○○○  42% ⟳ 7:06am"
+
+printf '{"blocks":[]}\n' > "$CONFIG_FILE"
+render "$(payload)"
+assert "an empty block list renders nothing" ""
+
+printf '{"blocks":["model"]}\n' > "$CONFIG_FILE"
+clear_cache
+render "$(payload 'del(.rate_limits)')" CLAUDE_CODE_OAUTH_TOKEN=test-token \
+    STUB_CURL_CALLED="$TMP/config-curl-called"
+assert "hidden rate blocks do not fetch usage" "Opus 5"
+selected "hidden rate blocks do not fetch usage from the API" && {
+    if [ ! -e "$TMP/config-curl-called" ]; then
+        report_pass "hidden rate blocks do not fetch usage from the API"
+    else
+        report_fail "hidden rate blocks do not fetch usage from the API" "no curl call" "curl was called"
+    fi
+}
+
+printf '{"colors":{"blue":"#010203","green":"#040506"}}\n' > "$CONFIG_FILE"
+render "$(payload)"
+assert_color "config overrides named colors" $'\033[38;2;1;2;3mOpus 5'
+assert_color "configured threshold colors reach context" $'\033[38;2;4;5;6m25%'
+
+printf '{"bar_width":0,"colors":{"blue":"not-a-color"}}\n' > "$CONFIG_FILE"
+render "$(payload)"
+assert_color "invalid config values keep color defaults" $'\033[38;2;0;153;255mOpus 5'
+assert_re "invalid config values keep bar defaults" 'current ●●●●○○○○○○  42%'
+
+printf 'not json\n' > "$CONFIG_FILE"
+render "$(payload)"
+assert "malformed config falls back without breaking output" "Opus 5 │ ✍️ 25% │ repo-clean (main)
+
+$RATES"
+assert_no_stderr "malformed config does not warn"
+
+printf '{}\n' > "$CONFIG_FILE"
+
 section "context window"
 
 render "$(payload '.context_window.current_usage.cache_read_input_tokens = 196000')"
@@ -433,6 +531,63 @@ for missing in 0 null; do
 
 current ●●●●○○○○○○  42%"
 done
+
+section "burn rate history"
+
+BURN_NOW=$(date +%s)
+BURN_RESET=$(( BURN_NOW + 3600 ))
+printf '%s\x1f%s\x1f%s\n' "$BURN_RESET" "$(( BURN_NOW - 3600 ))" 20 > "$HISTORY_FILE"
+render "$(payload '.rate_limits.five_hour.used_percentage = 50
+                    | .rate_limits.five_hour.resets_at = '"$BURN_RESET"'
+                    | del(.rate_limits.seven_day)')"
+assert_re "burn rate comes from cached samples in the current window" \
+    'current ●●●●●○○○○○  50% ↗ (29\.[0-9]|30\.0)%/h ⟳'
+assert_output_color "a sustainable five-hour pace stays green" \
+    $'\033[38;2;0;175;80m↗ '
+
+render "$(payload '.rate_limits.five_hour.used_percentage = 50
+                    | .rate_limits.five_hour.resets_at = '"$BURN_RESET"'
+                    | del(.rate_limits.seven_day)')" LC_ALL=C
+assert_re "burn rate has an ASCII fallback" \
+    'current #####-----  50% burn (29\.[0-9]|30\.0)%/h reset'
+
+selected "the current burn sample is appended to history" && {
+    saved_reset=""; saved_time=""; saved_pct=""
+    while IFS=$'\x1f' read -r found_reset found_time found_pct; do
+        saved_reset=$found_reset; saved_time=$found_time; saved_pct=$found_pct
+    done < "$HISTORY_FILE"
+    case "$saved_time" in ''|*[!0-9]*) saved_time_valid=false ;; *) saved_time_valid=true ;; esac
+    if [ "$saved_reset" = "$BURN_RESET" ] && [ "$saved_pct" = 50 ] &&
+       [ "$saved_time_valid" = true ] && [ "$saved_time" -ge "$BURN_NOW" ]; then
+        report_pass "the current burn sample is appended to history"
+    else
+        report_fail "the current burn sample is appended to history" \
+            "reset=$BURN_RESET time>=$BURN_NOW pct=50" \
+            "reset=$saved_reset time=$saved_time pct=$saved_pct"
+    fi
+}
+
+# A new reset is a new rate-limit window, so a previous window cannot skew it.
+NEXT_RESET=$(( BURN_RESET + 300 ))
+render "$(payload '.rate_limits.five_hour.used_percentage = 51
+                    | .rate_limits.five_hour.resets_at = '"$NEXT_RESET"'
+                    | del(.rate_limits.seven_day)')"
+assert_not_re "a reset change starts a fresh burn history" '%/h'
+
+ALERT_RESET=$(( BURN_NOW + 7200 ))
+printf '%s\x1f%s\x1f%s\n' "$ALERT_RESET" "$(( BURN_NOW - 3600 ))" 27 > "$HISTORY_FILE"
+render "$(payload '.rate_limits.five_hour.used_percentage = 50
+                    | .rate_limits.five_hour.resets_at = '"$ALERT_RESET"'
+                    | del(.rate_limits.seven_day)')"
+assert_output_color "a pace projected into the 90-percent zone turns yellow" \
+    $'\033[38;2;230;200;0m↗ '
+
+printf '%s\x1f%s\x1f%s\n' "$ALERT_RESET" "$(( BURN_NOW - 3600 ))" 20 > "$HISTORY_FILE"
+render "$(payload '.rate_limits.five_hour.used_percentage = 50
+                    | .rate_limits.five_hour.resets_at = '"$ALERT_RESET"'
+                    | del(.rate_limits.seven_day)')"
+assert_output_color "a pace projected to exhaust before reset turns red" \
+    $'\033[38;2;255;85;85m↗ '
 
 section "rate limits from the API cache"
 
@@ -573,7 +728,6 @@ section "cache directory"
 # Both defaults are derived rather than passed in, so these cases drop the
 # override the rest of the suite runs with.
 DEFAULT_CACHE_DIR="$HOME/.cache/claude-statusline"
-rm -rf "$HOME/.cache"
 render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR
 assert_dir "the cache lands under \$HOME/.cache by default" "$DEFAULT_CACHE_DIR"
 
@@ -599,7 +753,6 @@ else
     skip "$NONPRIVATE" "no POSIX modes on this filesystem"
 fi
 
-rm -rf "$TMP/xdg"
 render "$(payload)" -u CLAUDE_STATUSLINE_CACHE_DIR XDG_CACHE_HOME="$TMP/xdg"
 assert_dir "XDG_CACHE_HOME moves it" "$TMP/xdg/claude-statusline"
 
@@ -669,6 +822,22 @@ if ln -sf "$PLANTED_TARGET" "$PLANTED_DIR/statusline-usage-cache.json" 2>/dev/nu
 else
     skip "$PLANTED_LINK" "no symlink support here"
     skip "$PLANTED_WRITE" "no symlink support here"
+fi
+
+HISTORY_LINK="a symlinked burn history is not written through"
+HISTORY_LINK_DIR="$TMP/history-link"
+HISTORY_LINK_TARGET="$TMP/history-target"
+mkdir -m 700 "$HISTORY_LINK_DIR"
+printf 'not the history' > "$HISTORY_LINK_TARGET"
+if ln -s "$HISTORY_LINK_TARGET" "$HISTORY_LINK_DIR/statusline-usage-history" 2>/dev/null &&
+   sees_symlink "$HISTORY_LINK_DIR/statusline-usage-history"; then
+    render "$(payload '.rate_limits.five_hour.used_percentage = 55
+                        | .rate_limits.five_hour.resets_at = '"$BURN_RESET"'
+                        | del(.rate_limits.seven_day)')" \
+        CLAUDE_STATUSLINE_CACHE_DIR="$HISTORY_LINK_DIR"
+    assert_file "$HISTORY_LINK" "$HISTORY_LINK_TARGET" 'not the history'
+else
+    skip "$HISTORY_LINK" "no symlink support here"
 fi
 
 section "locale"
