@@ -392,6 +392,17 @@ assert "COLUMNS counts CJK characters as two cells" "界界…"
 render "$(payload 'del(.rate_limits) | .model.display_name = "e\u0301e\u0301e\u0301"')" COLUMNS=3
 assert "COLUMNS does not count combining marks twice" "éé…"
 
+REAL_JQ=$(command -v jq)
+cat > "$TMP/bin/jq" <<EOF
+#!/bin/bash
+[ "\${1:-}" = "-Rrsj" ] && exit 1
+exec "$REAL_JQ" "\$@"
+EOF
+chmod +x "$TMP/bin/jq"
+render "$(payload 'del(.rate_limits) | .model.display_name = "1234567890123456789012345"')" COLUMNS=20
+assert "COLUMNS keeps the original output when truncation fails" \
+    "1234567890123456789012345 │ ✍️ 25% │ repo-clean (main)"
+
 section "configuration"
 
 printf '{"blocks":["model","current"],"bar_width":4}\n' > "$CONFIG_FILE"

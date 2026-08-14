@@ -739,7 +739,8 @@ if is_num "${COLUMNS:-}" && [ "$COLUMNS" -gt 0 ]; then
     # SGR color sequences and combining marks take no terminal columns; CJK and
     # emoji take two. The final reset prevents a truncated colored block from
     # bleeding into the terminal.
-    print_output | jq -Rrsj --argjson limit "$COLUMNS" --arg marker "$truncate_char" '
+    output=$(print_output)
+    truncated=$(printf "%s" "$output" | jq -Rrsj --argjson limit "$COLUMNS" --arg marker "$truncate_char" '
         def ansi: startswith("\u001b");
         def cell_width:
             if test("^[\\p{M}\\p{Cf}]$") then 0
@@ -784,7 +785,12 @@ if is_num "${COLUMNS:-}" && [ "$COLUMNS" -gt 0 ]; then
               end;
 
         split("\n") | map(truncate) | join("\n")
-    '
+    ') || truncated=""
+    if [ -n "$truncated" ] || [ -z "$output" ]; then
+        printf "%s" "$truncated"
+    else
+        printf "%s" "$output"
+    fi
 else
     print_output
 fi
