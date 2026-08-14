@@ -353,22 +353,24 @@ else
 fi
 
 UNSAFE_BACKUP="uninstall refuses a symlinked backup"
-HOME_M="$TMP/unsafe-backup"
-mkdir -p "$HOME_M"
-install_into "$HOME_M"
-printf 'keep me' > "$TMP/unsafe-backup-target"
-if ln -s "$TMP/unsafe-backup-target" "$HOME_M/.claude/statusline.sh.bak" 2>/dev/null &&
-   [ -L "$HOME_M/.claude/statusline.sh.bak" ]; then
-    install_into "$HOME_M" --uninstall
-    if [ "$STATUS" -eq 1 ] && [ "$(version_of "$HOME_M/.claude/statusline.sh")" = "$VERSION" ] &&
-       [ "$(cat "$TMP/unsafe-backup-target")" = "keep me" ]; then
-        report_pass "$UNSAFE_BACKUP"
+if selected "$UNSAFE_BACKUP"; then
+    HOME_M="$TMP/unsafe-backup"
+    mkdir -p "$HOME_M"
+    install_into "$HOME_M"
+    printf 'keep me' > "$TMP/unsafe-backup-target"
+    if ln -s "$TMP/unsafe-backup-target" "$HOME_M/.claude/statusline.sh.bak" 2>/dev/null &&
+       [ -L "$HOME_M/.claude/statusline.sh.bak" ]; then
+        install_into "$HOME_M" --uninstall
+        if [ "$STATUS" -eq 1 ] && [ "$(version_of "$HOME_M/.claude/statusline.sh")" = "$VERSION" ] &&
+           [ "$(cat "$TMP/unsafe-backup-target")" = "keep me" ]; then
+            report_pass "$UNSAFE_BACKUP"
+        else
+            report_fail "$UNSAFE_BACKUP" "exit 1 + untouched script and target" \
+                "exit $STATUS version=$(version_of "$HOME_M/.claude/statusline.sh") target=$(cat "$TMP/unsafe-backup-target")"
+        fi
     else
-        report_fail "$UNSAFE_BACKUP" "exit 1 + untouched script and target" \
-            "exit $STATUS version=$(version_of "$HOME_M/.claude/statusline.sh") target=$(cat "$TMP/unsafe-backup-target")"
+        skip "$UNSAFE_BACKUP" "no symlink support here"
     fi
-else
-    skip "$UNSAFE_BACKUP" "no symlink support here"
 fi
 
 # A statusline.sh the user wrote themselves is backed up on install and handed
