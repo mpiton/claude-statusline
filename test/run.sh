@@ -386,13 +386,15 @@ render "$(payload 'del(.rate_limits) | .model.display_name = "e\u0301e\u0301e\u0
 assert "COLUMNS does not count combining marks twice" "éé…"
 
 REAL_JQ=$(command -v jq)
-cat > "$TMP/bin/jq" <<EOF
+mkdir -p "$TMP/failing-jq"
+cat > "$TMP/failing-jq/jq" <<EOF
 #!/bin/bash
 [ "\${1:-}" = "-Rrsj" ] && exit 1
 exec "$REAL_JQ" "\$@"
 EOF
-chmod +x "$TMP/bin/jq"
-render "$(payload 'del(.rate_limits) | .model.display_name = "1234567890123456789012345"')" COLUMNS=20
+chmod +x "$TMP/failing-jq/jq"
+render "$(payload 'del(.rate_limits) | .model.display_name = "1234567890123456789012345"')" \
+    COLUMNS=20 PATH="$TMP/failing-jq:$PATH"
 assert "COLUMNS keeps the original output when truncation fails" \
     "1234567890123456789012345 │ ✍️ 25% │ repo-clean (main)"
 
