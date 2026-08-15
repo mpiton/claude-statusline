@@ -20,7 +20,7 @@ It backs up your old status line if any, copies the status line script to
 The installed copy carries the release it came from on its second line:
 
 ```bash
-sed -n 2p ~/.claude/statusline.sh    # => # statusline-version: 2.0.0
+sed -n 2p ~/.claude/statusline.sh    # => # statusline-version: 2.1.0
 ```
 
 Rerun the install command to update it. A copy that is already current is left
