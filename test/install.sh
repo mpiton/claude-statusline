@@ -355,7 +355,14 @@ selected "$RELATIVE_BASH" && {
             const { findBash } = require(process.argv[1]);
             process.stdout.write(String(findBash()));
         ' "$INSTALLER" 2>&1)
-        check "$RELATIVE_BASH" "$BASH_DIR/mybash" "$found"
+        # macOS hands node a $TMPDIR under /private/var while the shell holds
+        # the /var symlink to it, so the answer is checked for being absolute
+        # and pointing at the right file rather than for one spelling of it.
+        case "$found" in
+            /*/relative-bash/mybash) resolved=absolute ;;
+            *) resolved=$found ;;
+        esac
+        check "$RELATIVE_BASH" absolute "$resolved"
     fi
 }
 
