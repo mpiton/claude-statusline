@@ -46,6 +46,42 @@ brings curl and git with it. jq you install yourself:
 winget install jqlang.jq
 ```
 
+## Windows
+
+Claude Code runs the status line through `cmd.exe`, which has no `bash` on PATH
+— Git for Windows only puts its `cmd` directory there, and the `bash.exe`
+Windows itself ships launches WSL. So the installer looks for the bash Git for
+Windows installs and writes its full path, along with the full path of the
+script, into `settings.json`:
+
+```json
+"statusLine": {
+  "type": "command",
+  "command": "\"C:\\Program Files\\Git\\bin\\bash.exe\" \"C:/Users/you/.claude/statusline.sh\""
+}
+```
+
+It searches next to the `git` on your PATH, then the usual install locations.
+Set `CLAUDE_LINE_BASH` to a `bash.exe` to choose one yourself. Use the copy in
+`Git\bin` rather than `Git\usr\bin`: the second starts without `/usr/bin` on
+PATH, so jq, curl and the coreutils the script calls all come back missing.
+
+## Profiles
+
+Claude Code reads its configuration from `CLAUDE_CONFIG_DIR` when that is set,
+and from `~/.claude` otherwise. Both the installer and the status line follow
+it, so a second profile is installed by pointing at it:
+
+```bash
+CLAUDE_CONFIG_DIR=~/.claude-work npx @mpiton/claude-line
+```
+
+That profile then keeps its own `statusline.sh`, `statusline.json`,
+`settings.json` and credentials, and only the profile named at install time is
+touched. Claude Code renders the status line on its own events; if the first
+render of a session lags behind, `"refreshInterval": 5` in the `statusLine`
+block re-runs the command every five seconds as well.
+
 ## Cache
 
 Rate limit responses and the git dirty flag are cached in

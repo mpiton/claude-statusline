@@ -38,7 +38,13 @@ reset='\033[0m'
 # ── Configuration ───────────────────────────────────────
 blocks="model,context,directory,cost,changes,style,effort,current,burn,weekly,extra"
 bar_width=10
-config_file="${CLAUDE_STATUSLINE_CONFIG:-$HOME/.claude/statusline.json}"
+# Claude Code reads its own configuration from CLAUDE_CONFIG_DIR when that is
+# set, and from ~/.claude otherwise. A session started on a second profile
+# keeps its settings, its credentials and this script's config together in
+# there; going to $HOME/.claude regardless read another profile's effort level
+# and missed the token the session was actually authenticated with.
+claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+config_file="${CLAUDE_STATUSLINE_CONFIG:-$claude_dir/statusline.json}"
 
 if [ -f "$config_file" ]; then
     config_fields=$(jq -r '
@@ -332,19 +338,29 @@ refresh_usage_cache() {
     local token="" blob creds_file response cache_tmp
     USAGE_RESPONSE=""
 
+    creds_file="$claude_dir/.credentials.json"
+
     if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
         token="$CLAUDE_CODE_OAUTH_TOKEN"
-    elif command -v security >/dev/null 2>&1; then
+    fi
+    # The keychain holds one entry for the whole machine, so a session on a
+    # second profile that read it would ask about the account the first profile
+    # logged in with. A credentials file inside the profile that session named
+    # is the more specific answer and goes first. The default profile keeps the
+    # old order: the keychain is where Claude Code writes on macOS, and a
+    # .credentials.json an older release left in ~/.claude should not outrank it.
+    if [ -z "$token" ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ -f "$creds_file" ]; then
+        token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
+    fi
+    if { [ -z "$token" ] || [ "$token" = "null" ]; } &&
+       command -v security >/dev/null 2>&1; then
         blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
         if [ -n "$blob" ]; then
             token=$(jq -r '.claudeAiOauth.accessToken // empty' <<< "$blob" 2>/dev/null)
         fi
     fi
-    if [ -z "$token" ] || [ "$token" = "null" ]; then
-        creds_file="${HOME}/.claude/.credentials.json"
-        if [ -f "$creds_file" ]; then
-            token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
-        fi
+    if { [ -z "$token" ] || [ "$token" = "null" ]; } && [ -f "$creds_file" ]; then
+        token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
     fi
     if [ -z "$token" ] || [ "$token" = "null" ]; then
         if command -v secret-tool >/dev/null 2>&1; then
@@ -423,7 +439,7 @@ pct_used=$(( current * 100 / size ))
 # Live session effort comes from stdin and follows /effort. settings.json is a
 # fallback for CLI versions that don't emit `.effort`, and goes stale otherwise.
 if block_enabled effort && [ -z "$effort" ]; then
-    settings_path="$HOME/.claude/settings.json"
+    settings_path="$claude_dir/settings.json"
     if [ -f "$settings_path" ]; then
         effort=$(jq -r '.effortLevel // empty' "$settings_path" 2>/dev/null)
     fi
