@@ -618,9 +618,11 @@ printf '{"blocks":["model","skills"],"skills_limit":1}\n' > "$CONFIG_FILE"
 render "$(with_transcript "$TMP/many.jsonl")"
 assert "skills_limit sets how many are named" "Opus 5 │ skills:delta +3"
 
+# More skills than the default names, so a 99 that got through would show all
+# four rather than three and a count.
 printf '{"blocks":["model","skills"],"skills_limit":99}\n' > "$CONFIG_FILE"
-render "$(with_transcript "$TMP/repeats.jsonl")"
-assert "an out-of-range skills_limit keeps the default" "Opus 5 │ skills:alpha,beta"
+render "$(with_transcript "$TMP/many.jsonl")"
+assert "an out-of-range skills_limit keeps the default" "Opus 5 │ skills:beta,gamma,delta +1"
 
 printf '{"blocks":["model","skills"]}\n' > "$CONFIG_FILE"
 

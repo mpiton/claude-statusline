@@ -132,7 +132,7 @@ ignored. Set `CLAUDE_STATUSLINE_CONFIG` to use another file.
 it on:
 
 ```
-Opus 5 │ ✍️ 25% │ my-repo (main) │ skills:human-writer,artifact-design +2
+Opus 5 │ ✍️ 25% │ my-repo (main) │ skills:human-writer,artifact-design,pdf +1
 ```
 
 Claude Code sends no skill list on stdin, so the names come from the session
