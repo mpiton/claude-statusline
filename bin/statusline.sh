@@ -38,6 +38,7 @@ reset='\033[0m'
 # ── Configuration ───────────────────────────────────────
 blocks="model,context,directory,cost,changes,style,effort,current,burn,weekly,extra"
 bar_width=10
+skills_limit=3
 # Claude Code reads its own configuration from CLAUDE_CONFIG_DIR when that is
 # set, and from ~/.claude otherwise. A session started on a second profile
 # keeps its settings, its credentials and this script's config together in
@@ -52,7 +53,7 @@ if [ -f "$config_file" ]; then
             . == "model" or . == "context" or . == "directory"
             or . == "cost" or . == "changes" or . == "style"
             or . == "effort" or . == "current" or . == "burn"
-            or . == "weekly" or . == "extra";
+            or . == "weekly" or . == "extra" or . == "skills";
         def color: strings | select(test("^#[0-9A-Fa-f]{6}$"));
 
         . as $config
@@ -62,6 +63,7 @@ if [ -f "$config_file" ]; then
                  "set:" + ([$config.blocks[] | strings | select(known_block)] | unique | join(","))
              else "" end),
             (($config.bar_width | numbers | select(. == floor and . >= 1 and . <= 40)) // ""),
+            (($config.skills_limit | numbers | select(. == floor and . >= 1 and . <= 10)) // ""),
             (($colors.blue | color) // ""),
             (($colors.orange | color) // ""),
             (($colors.green | color) // ""),
@@ -74,11 +76,12 @@ if [ -f "$config_file" ]; then
     ' "$config_file" 2>/dev/null)
 
     if [ -n "$config_fields" ]; then
-        IFS=$'\x1f' read -r config_blocks config_bar_width \
+        IFS=$'\x1f' read -r config_blocks config_bar_width config_skills_limit \
             config_blue config_orange config_green config_cyan \
             config_red config_yellow config_white config_magenta <<< "$config_fields"
         case "$config_blocks" in set:*) blocks=${config_blocks#set:} ;; esac
         [ -n "$config_bar_width" ] && bar_width=$config_bar_width
+        [ -n "$config_skills_limit" ] && skills_limit=$config_skills_limit
 
         set_color() {
             local name=$1 hex=${2#\#}
@@ -416,13 +419,14 @@ fields=$(jq -r '[
     ((.cost.total_lines_added | numbers | floor | select(. >= 0)) // 0),
     ((.cost.total_lines_removed | numbers | floor | select(. >= 0)) // 0),
     ((.output_style.name | strings) // ""),
-    (.exceeds_200k_tokens == true)
+    (.exceeds_200k_tokens == true),
+    ((.transcript_path | strings) // "")
 ] | map(tostring) | join("\u001f")' <<< "$input" 2>/dev/null)
 
 IFS=$'\x1f' read -r model_name size input_tokens cache_create cache_read \
     effort cwd stdin_five_pct stdin_five_reset stdin_seven_pct stdin_seven_reset \
     total_cost_usd total_lines_added total_lines_removed output_style exceeds_200k \
-    <<< "$fields"
+    transcript_path <<< "$fields"
 
 # Malformed stdin leaves every field empty; render the bare fallbacks.
 [ -n "$model_name" ] || model_name="Claude"
@@ -573,6 +577,116 @@ if block_enabled changes &&
 fi
 block_enabled style && [ -n "$output_style" ] &&
     append_line1 "${dim}style:${reset}${white}${output_style}${reset}"
+
+# The payload carries no list of the skills a session has loaded, so they come
+# out of the transcript, where every invocation is a `Skill` tool call. Reading
+# the whole file on every render would cost more than the rest of this script
+# put together, so the scan is incremental: the cache entry holds how far the
+# last render read and the names it found, and only the bytes appended since
+# are looked at. With caching off the file is read in full each time instead.
+if block_enabled skills && [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+    skills_cache=""
+    if $cache_dir_private; then
+        # The session id names the cache entry, and it arrives from stdin like
+        # every other field here, so it has to be a file name and nothing else.
+        # Git Bash gets the path Claude Code wrote it, backslashes and all, and
+        # reads it happily — but the file name has to come off both separators
+        # or the key is rejected below and every render rescans the file.
+        skills_key=${transcript_path##*/}
+        skills_key=${skills_key##*\\}
+        skills_key=${skills_key%.jsonl}
+        case "$skills_key" in
+            ''|*[!A-Za-z0-9._-]*) skills_key="" ;;
+        esac
+        [ -n "$skills_key" ] && skills_cache="$cache_dir/statusline-skills-$skills_key"
+    fi
+
+    skills_offset=0
+    skills_seen=""
+    if cache_readable "$skills_cache"; then
+        IFS=$'\x1f' read -r cached_offset cached_skills < "$skills_cache"
+        is_num "$cached_offset" && skills_offset=$cached_offset
+        skills_seen=$cached_skills
+    fi
+
+    if [ "$date_flavor" = gnu ]; then
+        skills_size=$(stat -c %s "$transcript_path" 2>/dev/null || stat -f %z "$transcript_path" 2>/dev/null)
+    else
+        skills_size=$(stat -f %z "$transcript_path" 2>/dev/null || stat -c %s "$transcript_path" 2>/dev/null)
+    fi
+    is_num "$skills_size" || skills_size=0
+    # A transcript shorter than where the last render stopped is a different
+    # session under a reused name, or a rewritten file; either way the names
+    # cached against it no longer describe it.
+    if [ "$skills_size" -lt "$skills_offset" ]; then
+        skills_offset=0
+        skills_seen=""
+    fi
+
+    if [ "$skills_size" -gt "$skills_offset" ]; then
+        # awk answers with how much of the chunk it consumed as whole lines,
+        # so a render that catches the writer mid-line resumes at the start of
+        # that line rather than losing its first half.
+        skills_scan=$(tail -c "+$(( skills_offset + 1 ))" "$transcript_path" 2>/dev/null |
+            awk -v seen="$skills_seen" -v size="$(( skills_size - skills_offset ))" '
+                function remember(name,   i) {
+                    if (name !~ /^[A-Za-z0-9._:-]+$/) return
+                    for (i = 1; i <= n; i++) if (found[i] == name) return
+                    found[++n] = name
+                    # Cap the list rather than let a long session grow the cache
+                    # entry without bound. The oldest names drop out first.
+                    if (n > 40) { for (i = 1; i < n; i++) found[i] = found[i + 1]; n-- }
+                }
+                BEGIN {
+                    US = sprintf("%c", 31)
+                    count = split(seen, prior, ",")
+                    for (i = 1; i <= count; i++) remember(prior[i])
+                }
+                {
+                    last = length($0) + 1
+                    bytes += last
+                    line = $0
+                    while (match(line, /"name":"Skill","input":[{][^}]*"skill":"[^"]*"/)) {
+                        # The closing quote is part of the match, so that a
+                        # half-written line is not read as a shortened name.
+                        name = substr(line, RSTART, RLENGTH)
+                        sub(/.*"skill":"/, "", name)
+                        sub(/"$/, "", name)
+                        remember(name)
+                        line = substr(line, RSTART + RLENGTH)
+                    }
+                }
+                END {
+                    # Counting a newline the last line never had means the chunk
+                    # ended mid-line: hand that line back to the next render.
+                    printf "%d%s", (bytes > size ? bytes - last : bytes), US
+                    for (i = 1; i <= n; i++) printf "%s%s", (i > 1 ? "," : ""), found[i]
+                }
+            ')
+        IFS=$'\x1f' read -r skills_read skills_seen <<< "$skills_scan"
+        is_num "$skills_read" || skills_read=0
+        skills_offset=$(( skills_offset + skills_read ))
+        if cache_writable "$skills_cache"; then
+            printf '%s\x1f%s' "$skills_offset" "$skills_seen" > "$skills_cache" 2>/dev/null
+        fi
+    fi
+
+    if [ -n "$skills_seen" ]; then
+        IFS=, read -r -a skills_names <<< "$skills_seen"
+        skills_count=${#skills_names[@]}
+        skills_shown=$skills_limit
+        [ "$skills_shown" -gt "$skills_count" ] && skills_shown=$skills_count
+        skills_text=""
+        for (( i = skills_count - skills_shown; i < skills_count; i++ )); do
+            [ -n "$skills_text" ] && skills_text+=","
+            skills_text+=${skills_names[i]}
+        done
+        skills_block="${dim}skills:${reset}${white}${skills_text}${reset}"
+        [ "$skills_count" -gt "$skills_shown" ] &&
+            skills_block+=" ${dim}+$(( skills_count - skills_shown ))${reset}"
+        append_line1 "$skills_block"
+    fi
+fi
 
 if block_enabled effort && [ -n "$effort" ]; then
     case "$effort" in

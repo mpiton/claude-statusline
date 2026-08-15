@@ -84,7 +84,8 @@ block re-runs the command every five seconds as well.
 
 ## Cache
 
-Rate limit responses and the git dirty flag are cached in
+Rate limit responses, the git dirty flag and how far the skills block has read
+the transcript are cached in
 `${XDG_CACHE_HOME:-~/.cache}/claude-statusline`, created private to you.
 `CLAUDE_STATUSLINE_CACHE_DIR` moves it. A directory that is a symlink, or that
 another user owns, is left alone and caching is skipped for that run. Inside a
@@ -104,10 +105,11 @@ shows every supported setting; omitted keys keep their built-in value.
 ```json
 {
   "blocks": [
-    "model", "context", "directory", "cost", "changes", "style", "effort",
-    "current", "burn", "weekly", "extra"
+    "model", "context", "directory", "cost", "changes", "style", "skills",
+    "effort", "current", "burn", "weekly", "extra"
   ],
   "bar_width": 10,
+  "skills_limit": 3,
   "colors": {
     "blue": "#0099ff",
     "orange": "#ffb055",
@@ -125,6 +127,21 @@ Blocks always render in the order above; the array only selects them. `burn`
 is part of `current`, and has no effect when `current` is hidden. `bar_width`
 accepts integers from 1 to 40 and colors accept `#RRGGBB`. Invalid values are
 ignored. Set `CLAUDE_STATUSLINE_CONFIG` to use another file.
+
+`skills` is the one block not in the default set — name it in `blocks` to turn
+it on:
+
+```
+Opus 5 │ ✍️ 25% │ my-repo (main) │ skills:human-writer,artifact-design,pdf +1
+```
+
+Claude Code sends no skill list on stdin, so the names come from the session
+transcript, where every invocation is a `Skill` tool call. That means skills
+the session invoked, in the order it first invoked them, not skills available
+to it. The most recent `skills_limit` are named — 1 to 10, 3 by default — and
+the rest become the `+N`. Only the part of the transcript written since the
+last render is read, so the block costs a few milliseconds however long the
+session runs.
 
 ## Tests
 
