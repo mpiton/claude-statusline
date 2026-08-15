@@ -585,6 +585,98 @@ render "$(payload 'del(.rate_limits)')" STUB_CURL_BODY="$TMP/profile-response.js
 assert_token "an empty keychain falls back to the credentials file" home-token
 rm -f "$HOME/.claude/.credentials.json"
 clear_cache
+section "skills"
+
+# Nothing in the payload says which skills a session loaded, so the block reads
+# the transcript that session is writing and picks the `Skill` calls out of it.
+skill_call() {
+    printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"%s"}}]}}\n' "$1"
+}
+transcript() {
+    local path="$TMP/$1.jsonl" skill
+    : > "$path"
+    shift
+    for skill in "$@"; do skill_call "$skill" >> "$path"; done
+    printf '%s' "$path"
+}
+with_transcript() {
+    payload ".transcript_path = \"$1\""
+}
+
+printf '{"blocks":["model","skills"]}\n' > "$CONFIG_FILE"
+
+render "$(with_transcript "$(transcript basic human-writer artifact-design)")"
+assert "the skills of the session are listed" "Opus 5 │ skills:human-writer,artifact-design"
+
+render "$(with_transcript "$(transcript repeats alpha beta alpha)")"
+assert "a skill invoked twice is listed once" "Opus 5 │ skills:alpha,beta"
+
+render "$(with_transcript "$(transcript many alpha beta gamma delta)")"
+assert "past the limit the oldest become a count" "Opus 5 │ skills:beta,gamma,delta +1"
+
+printf '{"blocks":["model","skills"],"skills_limit":1}\n' > "$CONFIG_FILE"
+render "$(with_transcript "$TMP/many.jsonl")"
+assert "skills_limit sets how many are named" "Opus 5 │ skills:delta +3"
+
+printf '{"blocks":["model","skills"],"skills_limit":99}\n' > "$CONFIG_FILE"
+render "$(with_transcript "$TMP/repeats.jsonl")"
+assert "an out-of-range skills_limit keeps the default" "Opus 5 │ skills:alpha,beta"
+
+printf '{"blocks":["model","skills"]}\n' > "$CONFIG_FILE"
+
+# Only the bytes appended since the last render are scanned, so what the cache
+# carries over has to survive both a growing file and a rewritten one.
+GROWING=$(transcript growing alpha)
+render "$(with_transcript "$GROWING")"
+skill_call beta >> "$GROWING"
+render "$(with_transcript "$GROWING")"
+assert "a skill invoked later joins the list" "Opus 5 │ skills:alpha,beta"
+
+# Catch the writer mid-line: the tail of a partial line is no reason to lose
+# its head on the next pass.
+printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","in' >> "$GROWING"
+render "$(with_transcript "$GROWING")"
+assert "half a line is not read as a skill" "Opus 5 │ skills:alpha,beta"
+printf 'put":{"skill":"gamma"}}]}}\n' >> "$GROWING"
+render "$(with_transcript "$GROWING")"
+assert "the line finishes and its skill shows up" "Opus 5 │ skills:alpha,beta,gamma"
+
+skill_call delta > "$GROWING"
+render "$(with_transcript "$GROWING")"
+assert "a shorter transcript is read from the start again" "Opus 5 │ skills:delta"
+
+# The transcript is written by the model, so a name is only rendered when it
+# looks like one — an escape sequence in there would otherwise reach a terminal.
+{
+    printf '{"name":"Skill","input":{"skill":"\\u001b[31mred"}}\n'
+    printf '{"name":"Skill","input":{"skill":"has space"}}\n'
+    skill_call plugin:packaged
+} > "$TMP/odd-names.jsonl"
+render "$(with_transcript "$TMP/odd-names.jsonl")"
+assert "a skill name that is not one is dropped" "Opus 5 │ skills:plugin:packaged"
+
+render "$(with_transcript "$TMP/no-such-transcript.jsonl")"
+assert "a transcript that is not there renders nothing" "Opus 5"
+
+render "$(payload)"
+assert "a payload without a transcript renders nothing" "Opus 5"
+
+# With caching off the offset has nowhere to live and the file is read whole,
+# which has to reach the same answer.
+NOCACHE_DIR="$TMP/skills-nocache"
+mkdir -m 700 "$NOCACHE_DIR"
+chmod 777 "$NOCACHE_DIR"
+NOCACHE="skills are read without a cache to carry them"
+if [ "$(dir_mode "$NOCACHE_DIR")" = 777 ]; then
+    render "$(with_transcript "$TMP/basic.jsonl")" CLAUDE_STATUSLINE_CACHE_DIR="$NOCACHE_DIR"
+    assert "$NOCACHE" "Opus 5 │ skills:human-writer,artifact-design"
+else
+    skip "$NOCACHE" "no POSIX modes on this filesystem"
+fi
+
+printf '{}\n' > "$CONFIG_FILE"
+render "$(with_transcript "$TMP/basic.jsonl")"
+assert_line1_re "the block stays out of the default line" 'repo-clean \(main\)$'
 
 section "rate limits from stdin"
 
