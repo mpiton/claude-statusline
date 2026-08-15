@@ -4,12 +4,25 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const { execFileSync } = require("child_process");
 
-const CLAUDE_DIR = path.join(os.homedir(), ".claude");
+// Claude Code reads its own configuration from CLAUDE_CONFIG_DIR when that is
+// set, and from ~/.claude otherwise. Following it is what makes a second
+// profile installable: the settings.json in there is the only one that session
+// reads, and the script has to land beside it.
+const CLAUDE_DIR = process.env.CLAUDE_CONFIG_DIR
+  ? path.resolve(process.env.CLAUDE_CONFIG_DIR)
+  : path.join(os.homedir(), ".claude");
 const SETTINGS_FILE = path.join(CLAUDE_DIR, "settings.json");
 const STATUSLINE_DEST = path.join(CLAUDE_DIR, "statusline.sh");
 const STATUSLINE_SRC = path.resolve(__dirname, "statusline.sh");
-const STATUSLINE_COMMAND = 'bash "$HOME/.claude/statusline.sh"';
+
+// A POSIX shell resolves the profile itself at render time, so one settings.json
+// keeps working across machines whose $HOME differs and across profiles.
+const POSIX_COMMAND = 'bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/statusline.sh"';
+// What every release up to 2.0.0 wrote. Still recognised, so an upgrade
+// replaces it and an uninstall knows the setting is ours to remove.
+const LEGACY_COMMANDS = ['bash "$HOME/.claude/statusline.sh"'];
 
 // The installed script says which release it came from, so a stale copy is
 // recognisable — by the user reading it, by us when deciding whether the copy
@@ -63,22 +76,21 @@ const JQ_INSTALL =
   }[process.platform] || "sudo apt install jq, or whatever your distro uses";
 
 // Ask bash what it can see, since bash is what runs the statusline at render
-// time. The probe used to be `which jq`, which execSync hands to cmd.exe on
-// Windows — there is no `which` there, so all three looked missing and the
-// install stopped before it started.
-function checkDeps() {
-  const { execFileSync } = require("child_process");
+// time — the same bash the command will name. The probe used to be `which jq`,
+// which execSync hands to cmd.exe on Windows — there is no `which` there, so
+// all three looked missing and the install stopped before it started.
+function checkDeps(bashPath) {
   const probe = DEPS.map((dep) => `command -v ${dep} >/dev/null || echo ${dep}`).join("\n");
 
   let found;
   try {
-    found = execFileSync("bash", ["-c", probe], {
+    found = execFileSync(bashPath || "bash", ["-c", probe], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
     });
   } catch {
-    // No bash on PATH, so nothing here would run anyway — settings.json points
-    // Claude Code at `bash "$HOME/.claude/statusline.sh"`.
+    // No bash to be had, so nothing here would run anyway — settings.json
+    // points Claude Code at a bash invocation.
     return ["bash"];
   }
 
@@ -86,6 +98,98 @@ function checkDeps() {
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+// Git Bash takes C:/Users/… as readily as the backslash spelling, and a
+// settings.json without escaped separators is the one a user can read.
+function toBashPath(file) {
+  return file.replace(/\\/g, "/");
+}
+
+// Claude Code runs a status line through the platform shell, which on Windows
+// is `cmd.exe /d /s /c`. That expands neither `$HOME` nor
+// `${CLAUDE_CONFIG_DIR:-…}`, and has no `bash` on PATH — Git for Windows adds
+// only its cmd directory there, and the bash.exe Windows itself ships is the
+// WSL launcher. So Windows gets both paths resolved here, at install time.
+function statusLineCommand(platform, claudeDir, bashPath) {
+  if (platform !== "win32") return POSIX_COMMAND;
+  return `"${bashPath}" "${toBashPath(path.join(claudeDir, "statusline.sh"))}"`;
+}
+
+// `where` prints every match on PATH, one per line, and exits non-zero when
+// there are none.
+function whereAll(name) {
+  try {
+    return execFileSync("where", [name], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// Git for Windows keeps bash.exe in <root>\bin, and that is the copy to use:
+// it sets up the MSYS environment, while <root>\usr\bin\bash.exe starts
+// without /usr/bin on PATH, so jq, curl and the coreutils this script calls all
+// come back "not found".
+function bashCandidates() {
+  const found = [];
+  const add = (candidate) => {
+    if (candidate && !found.includes(candidate)) found.push(candidate);
+  };
+
+  add(process.env.CLAUDE_LINE_BASH);
+
+  // git is on PATH far more often than bash is, and it lives in the same
+  // install: both cmd\git.exe and mingw64\bin\git.exe sit under <root>.
+  for (const gitPath of whereAll("git")) {
+    let dir = path.dirname(gitPath);
+    for (let up = 0; up < 3; up++) {
+      add(path.join(dir, "bin", "bash.exe"));
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+
+  for (const root of [
+    process.env.ProgramW6432,
+    process.env.ProgramFiles,
+    process.env["ProgramFiles(x86)"],
+  ]) {
+    if (root) add(path.join(root, "Git", "bin", "bash.exe"));
+  }
+  if (process.env.LOCALAPPDATA) {
+    add(path.join(process.env.LOCALAPPDATA, "Programs", "Git", "bin", "bash.exe"));
+  }
+
+  // Then whatever else is on PATH, minus the WSL launcher in System32: that
+  // one runs inside a Linux distribution, or just prints an install prompt
+  // when there is none.
+  const wsl = path.join(process.env.SystemRoot || "C:\\Windows", "System32").toLowerCase();
+  for (const candidate of whereAll("bash")) {
+    if (!candidate.toLowerCase().startsWith(wsl)) add(candidate);
+  }
+
+  return found;
+}
+
+function findBash() {
+  for (const candidate of bashCandidates()) {
+    if (!fs.existsSync(candidate)) continue;
+    try {
+      execFileSync(candidate, ["-c", "exit 0"], { stdio: "ignore" });
+      return candidate;
+    } catch {
+      // There but not runnable: a stale PATH entry, or a bash whose DLLs are
+      // not where it expects them.
+    }
+  }
+  return null;
 }
 
 // The repo copy carries `dev`; the installed one carries the release it came
@@ -119,10 +223,17 @@ function fileState(file) {
 }
 
 function isManagedSetting(statusLine) {
+  if (!statusLine || statusLine.type !== "command" || typeof statusLine.command !== "string") {
+    return false;
+  }
+  if (statusLine.command === POSIX_COMMAND) return true;
+  if (LEGACY_COMMANDS.includes(statusLine.command)) return true;
+  // A Windows install names the bash it found, and that path moves between Git
+  // releases, so what identifies the setting there is the script it runs.
   return (
-    statusLine &&
-    statusLine.type === "command" &&
-    statusLine.command === STATUSLINE_COMMAND
+    process.platform === "win32" &&
+    /bash(\.exe)?"?\s/i.test(statusLine.command) &&
+    statusLine.command.endsWith(`"${toBashPath(STATUSLINE_DEST)}"`)
   );
 }
 
@@ -226,7 +337,19 @@ function run() {
   console.log(`  ${dim}─────────────────────${reset}`);
   console.log();
 
-  const missing = checkDeps();
+  // Nothing on Windows can rely on `bash` being on PATH at render time, so the
+  // install finds one now and writes its full path into the command.
+  let bashPath = null;
+  if (process.platform === "win32") {
+    bashPath = findBash();
+    if (!bashPath) {
+      fail("Could not find a bash to run the statusline");
+      log(`  ${dim}Install Git for Windows, or set CLAUDE_LINE_BASH to a bash.exe${reset}`);
+      process.exit(1);
+    }
+  }
+
+  const missing = checkDeps(bashPath);
   if (missing.length > 0) {
     fail(`Missing required dependencies: ${missing.join(", ")}`);
     log(`  Install them and try again.`);
@@ -239,6 +362,9 @@ function run() {
     process.exit(1);
   }
   success(`Dependencies found (${DEPS.join(", ")})`);
+  if (bashPath) {
+    log(`  ${dim}${bashPath}${reset}`);
+  }
 
   if (!fs.existsSync(CLAUDE_DIR)) {
     fs.mkdirSync(CLAUDE_DIR, { recursive: true });
@@ -288,7 +414,7 @@ function run() {
 
   const statusLineConfig = {
     type: "command",
-    command: STATUSLINE_COMMAND,
+    command: statusLineCommand(process.platform, CLAUDE_DIR, bashPath),
   };
 
   if (
@@ -308,4 +434,8 @@ function run() {
   console.log();
 }
 
-run();
+// The Windows command is assembled from paths that only exist on Windows, so
+// the suite calls the builder directly rather than installing there.
+module.exports = { statusLineCommand, POSIX_COMMAND };
+
+if (require.main === module) run();

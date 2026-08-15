@@ -38,7 +38,13 @@ reset='\033[0m'
 # ── Configuration ───────────────────────────────────────
 blocks="model,context,directory,cost,changes,style,effort,current,burn,weekly,extra"
 bar_width=10
-config_file="${CLAUDE_STATUSLINE_CONFIG:-$HOME/.claude/statusline.json}"
+# Claude Code reads its own configuration from CLAUDE_CONFIG_DIR when that is
+# set, and from ~/.claude otherwise. A session started on a second profile
+# keeps its settings, its credentials and this script's config together in
+# there; going to $HOME/.claude regardless read another profile's effort level
+# and missed the token the session was actually authenticated with.
+claude_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+config_file="${CLAUDE_STATUSLINE_CONFIG:-$claude_dir/statusline.json}"
 
 if [ -f "$config_file" ]; then
     config_fields=$(jq -r '
@@ -341,7 +347,7 @@ refresh_usage_cache() {
         fi
     fi
     if [ -z "$token" ] || [ "$token" = "null" ]; then
-        creds_file="${HOME}/.claude/.credentials.json"
+        creds_file="$claude_dir/.credentials.json"
         if [ -f "$creds_file" ]; then
             token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
         fi
@@ -423,7 +429,7 @@ pct_used=$(( current * 100 / size ))
 # Live session effort comes from stdin and follows /effort. settings.json is a
 # fallback for CLI versions that don't emit `.effort`, and goes stale otherwise.
 if block_enabled effort && [ -z "$effort" ]; then
-    settings_path="$HOME/.claude/settings.json"
+    settings_path="$claude_dir/settings.json"
     if [ -f "$settings_path" ]; then
         effort=$(jq -r '.effortLevel // empty' "$settings_path" 2>/dev/null)
     fi

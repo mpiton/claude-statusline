@@ -79,8 +79,11 @@ node_home() {
 # two files differ by that one line and nothing else.
 # jq rather than node: node on Windows cannot require() the MSYS path $ROOT is.
 VERSION=$(jq -r .version "$ROOT/package.json")
-# shellcheck disable=SC2016  # $HOME stays literal in the command under test.
-MANAGED_COMMAND='bash "$HOME/.claude/statusline.sh"'
+PLATFORM=$(node -p 'process.platform' 2>/dev/null)
+# shellcheck disable=SC2016  # the expansions stay literal in the command under test.
+MANAGED_COMMAND='bash "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/statusline.sh"'
+# shellcheck disable=SC2016  # what every release up to 2.0.0 wrote.
+LEGACY_COMMAND='bash "$HOME/.claude/statusline.sh"'
 # An empty version turns every check below into a substring match against
 # anything, which is how a broken lookup passed CI once already.
 [ -n "$VERSION" ] || {
@@ -96,6 +99,33 @@ install_into() {
     local home="$1"; shift
     OUT=$(HOME="$home" USERPROFILE="$(node_home "$home")" node "$INSTALLER" "$@" 2>&1)
     STATUS=$?
+}
+
+# A second profile is a CLAUDE_CONFIG_DIR pointing somewhere other than
+# ~/.claude, which node has to be handed in the same spelling as USERPROFILE.
+install_profile() {
+    local home="$1" profile="$2"; shift 2
+    OUT=$(HOME="$home" USERPROFILE="$(node_home "$home")" \
+        CLAUDE_CONFIG_DIR="$(node_home "$profile")" node "$INSTALLER" "$@" 2>&1)
+    STATUS=$?
+}
+
+# The exact command is only predictable off Windows: there the installer writes
+# the bash it found and an absolute script path, since cmd.exe expands neither
+# $HOME nor ${CLAUDE_CONFIG_DIR:-…}.
+check_command() {
+    local name=$1 settings=$2 actual
+    actual=$(jq -r '.statusLine.command // ""' "$settings" 2>/dev/null)
+    if [ "$PLATFORM" != win32 ]; then
+        check "$name" "$MANAGED_COMMAND" "$actual"
+        return 0
+    fi
+    selected "$name" || return 0
+    case "$actual" in
+        *bash*\"*statusline.sh\") report_pass "$name" ;;
+        *) report_fail "$name" "a quoted bash invocation ending in statusline.sh" \
+            "$(printf '%q' "$actual")" ;;
+    esac
 }
 
 # ── Fresh install ───────────────────────────────────────
@@ -118,9 +148,7 @@ check "the installed script carries the package version" "$VERSION" \
     "$(version_of "$HOME_A/.claude/statusline.sh")"
 check "the packaged source carries an unstamped marker" "dev" \
     "$(version_of "$ROOT/bin/statusline.sh")"
-# shellcheck disable=SC2016  # $HOME stays literal in the command the installer writes.
-check "it points settings.json at the installed script" 'bash "$HOME/.claude/statusline.sh"' \
-    "$(jq -r '.statusLine.command // ""' "$HOME_A/.claude/settings.json" 2>/dev/null)"
+check_command "it points settings.json at the installed script" "$HOME_A/.claude/settings.json"
 check "it registers statusLine as a command hook" "command" \
     "$(jq -r '.statusLine.type // ""' "$HOME_A/.claude/settings.json" 2>/dev/null)"
 
@@ -153,6 +181,15 @@ check "a second install is a no-op on settings" "yes" \
     "$(printf '%s' "$OUT" | grep -q "Settings already configured" && echo yes || echo no)"
 check "a second install skips the copy" "yes" \
     "$(printf '%s' "$OUT" | grep -q "already at $VERSION" && echo yes || echo no)"
+
+# A settings.json written by an earlier release names the default profile
+# outright. Rewrite it, or a second profile keeps running the wrong script.
+HOME_T="$TMP/legacy-setting"
+mkdir -p "$HOME_T/.claude"
+jq -n --arg command "$LEGACY_COMMAND" '{statusLine:{type:"command",command:$command}}' \
+    > "$HOME_T/.claude/settings.json"
+install_into "$HOME_T"
+check_command "an older command string is upgraded" "$HOME_T/.claude/settings.json"
 
 HOME_C="$TMP/broken"
 mkdir -p "$HOME_C/.claude"
@@ -246,6 +283,56 @@ selected "the dependency probe does not go through which" && {
     fi
 }
 
+# ── Profiles ────────────────────────────────────────────
+
+section "profiles"
+
+# Claude Code reads the profile CLAUDE_CONFIG_DIR names, so that is the
+# settings.json the statusline has to be registered in, and the directory the
+# script has to sit in.
+HOME_P="$TMP/profile"
+PROFILE="$HOME_P/.claude-work"
+mkdir -p "$PROFILE"
+install_profile "$HOME_P" "$PROFILE"
+
+check "installing under CLAUDE_CONFIG_DIR exits clean" "0" "$STATUS"
+check "the script lands in the profile" "$VERSION" "$(version_of "$PROFILE/statusline.sh")"
+check "the default directory is left alone" "gone" \
+    "$([ -e "$HOME_P/.claude" ] && echo present || echo gone)"
+check_command "the profile settings.json points at a statusline" "$PROFILE/settings.json"
+
+install_profile "$HOME_P" "$PROFILE" --uninstall
+check "uninstalling under CLAUDE_CONFIG_DIR clears the profile" "gone null" \
+    "$([ -e "$PROFILE/statusline.sh" ] && echo present || echo gone) \
+$(jq -r '.statusLine // "null"' "$PROFILE/settings.json" 2>/dev/null)"
+
+# A profile nobody has installed into yet has no directory either.
+HOME_Q="$TMP/profile-fresh"
+mkdir -p "$HOME_Q"
+install_profile "$HOME_Q" "$HOME_Q/.claude-personal"
+check "a missing profile directory is created" "$VERSION" \
+    "$(version_of "$HOME_Q/.claude-personal/statusline.sh")"
+
+# The Windows branch of the command builder, run where Windows is not: cmd.exe
+# expands neither variable in the POSIX command, so both paths are resolved at
+# install time there.
+WIN_COMMAND="the Windows command carries absolute paths"
+selected "$WIN_COMMAND" && {
+    if [ "$PLATFORM" = win32 ]; then
+        skip "$WIN_COMMAND" "this run writes it for real"
+    else
+        built=$(node -e '
+            const { statusLineCommand } = require(process.argv[1]);
+            process.stdout.write(
+                statusLineCommand("win32", "C:\\Users\\ROG\\.claude",
+                                  "C:\\Program Files\\Git\\bin\\bash.exe"),
+            );
+        ' "$INSTALLER" 2>&1)
+        check "$WIN_COMMAND" \
+            '"C:\Program Files\Git\bin\bash.exe" "C:/Users/ROG/.claude/statusline.sh"' "$built"
+    fi
+}
+
 # ── Uninstall ───────────────────────────────────────────
 
 section "uninstall"
@@ -265,6 +352,18 @@ HOME_D="$TMP/never-installed"
 mkdir -p "$HOME_D"
 install_into "$HOME_D" --uninstall
 check "uninstalling what was never installed is not an error" "0" "$STATUS"
+
+# An install upgrades the string, but a settings.json can reach the uninstaller
+# still carrying what an earlier release wrote.
+HOME_S="$TMP/legacy-command"
+mkdir -p "$HOME_S"
+install_into "$HOME_S"
+jq -n --arg command "$LEGACY_COMMAND" '{statusLine:{type:"command",command:$command}}' \
+    > "$HOME_S/.claude/settings.json"
+install_into "$HOME_S" --uninstall
+check "uninstall recognises the command earlier releases wrote" "gone null" \
+    "$([ -e "$HOME_S/.claude/statusline.sh" ] && echo present || echo gone) \
+$(jq -r '.statusLine // "null"' "$HOME_S/.claude/settings.json" 2>/dev/null)"
 
 # An uninstall command must not claim the conventional path by itself. A user
 # script and the matching command can predate this package entirely.
@@ -306,7 +405,7 @@ if git cat-file -e "$LEGACY_COMMIT:bin/statusline.sh" 2>/dev/null; then
     HOME_L="$TMP/legacy"
     mkdir -p "$HOME_L/.claude"
     git show "$LEGACY_COMMIT:bin/statusline.sh" > "$HOME_L/.claude/statusline.sh"
-    jq -n --arg command "$MANAGED_COMMAND" \
+    jq -n --arg command "$LEGACY_COMMAND" \
         '{statusLine:{type:"command",command:$command}}' > "$HOME_L/.claude/settings.json"
     install_into "$HOME_L" --uninstall
     check "uninstall recognises a published pre-marker script" "gone" \
@@ -330,7 +429,7 @@ if git cat-file -e "$LEGACY_COMMIT:bin/statusline.sh" 2>/dev/null; then
     mkdir -p "$HOME_O/.claude"
     git show "$LEGACY_COMMIT:bin/statusline.sh" > "$HOME_O/.claude/statusline.sh"
     git show "$LEGACY_COMMIT:bin/statusline.sh" > "$HOME_O/.claude/statusline.sh.bak"
-    jq -n --arg command "$MANAGED_COMMAND" \
+    jq -n --arg command "$LEGACY_COMMAND" \
         '{statusLine:{type:"command",command:$command}}' > "$HOME_O/.claude/settings.json"
     install_into "$HOME_O" --uninstall
     check "legacy uninstall does not restore an old package backup" "gone gone" \

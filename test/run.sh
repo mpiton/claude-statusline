@@ -511,6 +511,41 @@ echo '{}' > "$HOME/.claude/settings.json"
 render "$(payload)"
 assert_line1_re "effort segment is dropped when no source has one" 'repo-clean \(main\)$'
 
+section "profile"
+
+# A session started on a second profile reads it through CLAUDE_CONFIG_DIR, and
+# everything this script looks up about that session is in there with it.
+PROFILE_DIR="$TMP/profile"
+mkdir -p "$PROFILE_DIR"
+echo '{"effortLevel":"xhigh"}' > "$PROFILE_DIR/settings.json"
+echo '{"effortLevel":"low"}' > "$HOME/.claude/settings.json"
+
+render "$(payload)" CLAUDE_CONFIG_DIR="$PROFILE_DIR"
+assert_line1_re "effort falls back to the profile settings.json" '│ ● xhigh$'
+
+render "$(payload)"
+assert_line1_re "an unset CLAUDE_CONFIG_DIR still means ~/.claude" '│ ◔ low$'
+echo '{}' > "$HOME/.claude/settings.json"
+
+printf '{"blocks":["model"]}\n' > "$PROFILE_DIR/statusline.json"
+render "$(payload)" CLAUDE_CONFIG_DIR="$PROFILE_DIR"
+assert "the profile carries its own display config" "Opus 5"
+rm -f "$PROFILE_DIR/statusline.json"
+
+# The OAuth token the API fallback needs is stored per profile as well.
+printf '{"claudeAiOauth":{"accessToken":"profile-token"}}' > "$PROFILE_DIR/.credentials.json"
+printf '%s' '{"five_hour":{"utilization":42.3,"resets_at":"2026-08-06T07:06:40Z"},
+              "seven_day":{"utilization":18.7,"resets_at":"2026-08-10T22:13:20Z"}}' \
+    > "$TMP/profile-response.json"
+clear_cache
+render "$(payload 'del(.rate_limits)')" CLAUDE_CONFIG_DIR="$PROFILE_DIR" \
+    STUB_CURL_BODY="$TMP/profile-response.json"
+assert "the profile credentials reach the API fallback" \
+    "Opus 5 │ ✍️ 25% │ repo-clean (main) │ ● xhigh
+
+$RATES"
+clear_cache
+
 section "rate limits from stdin"
 
 render "$(payload 'del(.rate_limits)')"
