@@ -637,6 +637,22 @@ if block_enabled skills && [ -n "$transcript_path" ] && [ -f "$transcript_path" 
                     # entry without bound. The oldest names drop out first.
                     if (n > 40) { for (i = 1; i < n; i++) found[i] = found[i + 1]; n-- }
                 }
+                # Instructions that open with the directory they came out of are
+                # named by its last component. JSON doubles the separators of a
+                # Windows path, so the pairs become the POSIX one first: that
+                # normalises the path and keeps a separator in front of a name
+                # like `notes` from reading as the \n that ends it.
+                function remember_dir(path) {
+                    gsub(/\\\\/, "/", path)
+                    # Neither an escape nor the end of the string in sight means
+                    # the path has not finished being written; the next render
+                    # reads that line again from its start.
+                    if (path !~ /[\\"]/) return
+                    sub(/\\n.*/, "", path)
+                    sub(/".*/, "", path)
+                    sub(/.*\//, "", path)
+                    remember(path)
+                }
                 BEGIN {
                     US = sprintf("%c", 31)
                     count = split(seen, prior, ",")
@@ -654,6 +670,34 @@ if block_enabled skills && [ -n "$transcript_path" ] && [ -f "$transcript_path" 
                         sub(/"$/, "", name)
                         remember(name)
                         line = substr(line, RSTART + RLENGTH)
+                    }
+                    # A skill the user starts with /its-name is no tool call at
+                    # all: Claude Code attaches its instructions to the prompt
+                    # instead. Recent versions list what they attached, older
+                    # ones only head the instructions with their directory, and
+                    # one session can hold both — so read either. A name both
+                    # forms report is remembered once.
+                    if (index($0, "\"type\":\"invoked_skills\"")) {
+                        line = $0
+                        while (match(line, /"name":"[^"]*","path":"[A-Za-z]+:/)) {
+                            # The path that follows is part of the match, so a
+                            # half-written line carries no name to be read.
+                            name = substr(line, RSTART, RLENGTH)
+                            sub(/.*"name":"/, "", name)
+                            sub(/","path":.*/, "", name)
+                            remember(name)
+                            line = substr(line, RSTART + RLENGTH)
+                        }
+                    }
+                    line = $0
+                    # The heading opens a JSON string of its own, which keeps a
+                    # session that merely talks about one from growing skills.
+                    while (match(line, /:"Base directory for this skill: /)) {
+                        line = substr(line, RSTART + RLENGTH)
+                        # A path outlasting the window is not one, and copying
+                        # the whole of a skill to look at its first line is what
+                        # the incremental scan exists to avoid.
+                        remember_dir(substr(line, 1, 512))
                     }
                 }
                 END {

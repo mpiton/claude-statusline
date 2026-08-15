@@ -136,12 +136,13 @@ Opus 5 │ ✍️ 25% │ my-repo (main) │ skills:human-writer,artifact-design
 ```
 
 Claude Code sends no skill list on stdin, so the names come from the session
-transcript, where every invocation is a `Skill` tool call. That means skills
-the session invoked, in the order it first invoked them, not skills available
-to it. The most recent `skills_limit` are named — 1 to 10, 3 by default — and
-the rest become the `+N`. Only the part of the transcript written since the
-last render is read, so the block costs a few milliseconds however long the
-session runs.
+transcript: the `Skill` calls the model makes, and the instructions Claude Code
+attaches to a prompt when a skill is started from its slash command. That means
+skills the session invoked, in the order it first invoked them, not skills
+available to it. The most recent `skills_limit` are named — 1 to 10, 3 by
+default — and the rest become the `+N`. Only the part of the transcript written
+since the last render is read, so the block costs a few milliseconds however
+long the session runs.
 
 ## Tests
 

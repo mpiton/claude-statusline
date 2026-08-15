@@ -592,6 +592,27 @@ section "skills"
 skill_call() {
     printf '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"%s"}}]}}\n' "$1"
 }
+# A skill started from its slash command is no tool call: Claude Code attaches
+# the instructions to the prompt. Recent versions list what they attached and
+# head the instructions with the directory they came out of, versions before
+# them only did the heading, and the skills shipped with Claude Code get the
+# listing without a directory to head anything with.
+skill_attachment() {
+    local name sep=""
+    printf '{"type":"attachment","attachment":{"type":"invoked_skills","skills":['
+    for name in "$@"; do
+        printf '%s{"name":"%s","path":"userSettings:%s","content":"Base directory for this skill: /home/u/.claude/skills/%s\\n\\n# heading"}' \
+            "$sep" "$name" "$name" "$name"
+        sep=,
+    done
+    printf ']}}\n'
+}
+skill_bundled() {
+    printf '{"type":"attachment","attachment":{"type":"invoked_skills","skills":[{"name":"%s","path":"bundled:%s","content":"# heading"}]}}\n' "$1" "$1"
+}
+skill_directory() {
+    printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: %s\\n\\n# heading"}]}}\n' "$1"
+}
 transcript() {
     local path="$TMP/$1.jsonl" skill
     : > "$path"
@@ -656,6 +677,54 @@ assert "a shorter transcript is read from the start again" "Opus 5 │ skills:de
 } > "$TMP/odd-names.jsonl"
 render "$(with_transcript "$TMP/odd-names.jsonl")"
 assert "a skill name that is not one is dropped" "Opus 5 │ skills:plugin:packaged"
+
+skill_attachment slashed > "$TMP/slashed.jsonl"
+render "$(with_transcript "$TMP/slashed.jsonl")"
+assert "a skill started from its slash command is listed" "Opus 5 │ skills:slashed"
+
+skill_attachment first second > "$TMP/two-at-once.jsonl"
+render "$(with_transcript "$TMP/two-at-once.jsonl")"
+assert "an attachment carrying two skills lists both" "Opus 5 │ skills:first,second"
+
+skill_bundled doctor > "$TMP/bundled.jsonl"
+render "$(with_transcript "$TMP/bundled.jsonl")"
+assert "a skill Claude Code ships is listed like the rest" "Opus 5 │ skills:doctor"
+
+skill_directory /home/u/.claude/skills/headed > "$TMP/headed.jsonl"
+render "$(with_transcript "$TMP/headed.jsonl")"
+assert "instructions headed by a directory name their skill" "Opus 5 │ skills:headed"
+
+# The separators of a Windows path arrive doubled, and this name starts with
+# the letter that would turn the last of them into the end of the path.
+skill_directory 'C:\\Users\\u\\.claude\\skills\\notes' > "$TMP/windows-dir.jsonl"
+render "$(with_transcript "$TMP/windows-dir.jsonl")"
+assert "a Windows directory is read to its last component" "Opus 5 │ skills:notes"
+
+{
+    skill_call twice-over
+    skill_attachment twice-over
+} > "$TMP/both-forms.jsonl"
+render "$(with_transcript "$TMP/both-forms.jsonl")"
+assert "a skill both forms report is listed once" "Opus 5 │ skills:twice-over"
+
+# A session that merely quotes the heading has invoked nothing.
+printf '{"type":"assistant","message":{"content":[{"type":"text","text":"grep found: Base directory for this skill: /home/u/.claude/skills/quoted"}]}}\n' \
+    > "$TMP/quoted-dir.jsonl"
+render "$(with_transcript "$TMP/quoted-dir.jsonl")"
+assert "a heading quoted mid-sentence names nothing" "Opus 5"
+
+# Same mid-line catch as the tool calls, for the heading that has no tool call
+# to be cut out of.
+GROWING_DIR="$TMP/growing-dir.jsonl"
+skill_call alpha > "$GROWING_DIR"
+render "$(with_transcript "$GROWING_DIR")"
+printf '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Base directory for this skill: /home/u/.claude/skills/beta' \
+    >> "$GROWING_DIR"
+render "$(with_transcript "$GROWING_DIR")"
+assert "half a directory is not read as a skill" "Opus 5 │ skills:alpha"
+printf '\\n\\n# heading"}]}}\n' >> "$GROWING_DIR"
+render "$(with_transcript "$GROWING_DIR")"
+assert "the directory finishes and names its skill" "Opus 5 │ skills:alpha,beta"
 
 render "$(with_transcript "$TMP/no-such-transcript.jsonl")"
 assert "a transcript that is not there renders nothing" "Opus 5"
