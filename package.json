@@ -1,6 +1,6 @@
 {
   "name": "@mpiton/claude-line",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "A status line for Claude Code CLI showing model, context usage, rate limits, and more",
   "bin": {
     "claude-line": "bin/install.js"
