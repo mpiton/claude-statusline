@@ -689,15 +689,20 @@ if block_enabled skills && [ -n "$transcript_path" ] && [ -f "$transcript_path" 
                             line = substr(line, RSTART + RLENGTH)
                         }
                     }
-                    line = $0
-                    # The heading opens a JSON string of its own, which keeps a
-                    # session that merely talks about one from growing skills.
-                    while (match(line, /:"Base directory for this skill: /)) {
-                        line = substr(line, RSTART + RLENGTH)
-                        # A path outlasting the window is not one, and copying
-                        # the whole of a skill to look at its first line is what
-                        # the incremental scan exists to avoid.
-                        remember_dir(substr(line, 1, 512))
+                    # The heading only counts where Claude Code writes it: at the
+                    # head of a prompt of its own. Read anywhere else it grows
+                    # skills out of a session that has merely looked at one —
+                    # the model repeating the heading back, or a tool handing
+                    # back a transcript that holds it.
+                    if (index($0, "\"role\":\"user\"") && !index($0, "\"tool_result\"")) {
+                        line = $0
+                        while (match(line, /"type":"text","text":"Base directory for this skill: /)) {
+                            line = substr(line, RSTART + RLENGTH)
+                            # A path outlasting the window is not one, and
+                            # copying a whole skill to read its first line is
+                            # what the incremental scan exists to avoid.
+                            remember_dir(substr(line, 1, 512))
+                        }
                     }
                 }
                 END {

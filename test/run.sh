@@ -707,11 +707,17 @@ assert "a Windows directory is read to its last component" "Opus 5 │ skills:no
 render "$(with_transcript "$TMP/both-forms.jsonl")"
 assert "a skill both forms report is listed once" "Opus 5 │ skills:twice-over"
 
-# A session that merely quotes the heading has invoked nothing.
-printf '{"type":"assistant","message":{"content":[{"type":"text","text":"grep found: Base directory for this skill: /home/u/.claude/skills/quoted"}]}}\n' \
+# A session that has merely looked at a heading has invoked nothing: the model
+# repeating one back, and a tool handing back a transcript that holds one.
+printf '{"type":"assistant","message":{"content":[{"type":"text","text":"Base directory for this skill: /home/u/.claude/skills/quoted"}]}}\n' \
     > "$TMP/quoted-dir.jsonl"
 render "$(with_transcript "$TMP/quoted-dir.jsonl")"
-assert "a heading quoted mid-sentence names nothing" "Opus 5"
+assert "a heading the model wrote names nothing" "Opus 5"
+
+printf '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":[{"type":"text","text":"Base directory for this skill: /home/u/.claude/skills/grepped"}]}]}}\n' \
+    > "$TMP/read-dir.jsonl"
+render "$(with_transcript "$TMP/read-dir.jsonl")"
+assert "a heading a tool read back names nothing" "Opus 5"
 
 # Same mid-line catch as the tool calls, for the heading that has no tool call
 # to be cut out of.
