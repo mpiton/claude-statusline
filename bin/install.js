@@ -180,10 +180,14 @@ function bashCandidates() {
 
 function findBash() {
   for (const candidate of bashCandidates()) {
-    if (!fs.existsSync(candidate)) continue;
+    // cmd.exe runs the status line from whatever directory Claude Code happens
+    // to be in, so a relative CLAUDE_LINE_BASH that resolves here would not
+    // resolve there. Store where it actually is.
+    const bash = path.resolve(candidate);
+    if (!fs.existsSync(bash)) continue;
     try {
-      execFileSync(candidate, ["-c", "exit 0"], { stdio: "ignore" });
-      return candidate;
+      execFileSync(bash, ["-c", "exit 0"], { stdio: "ignore" });
+      return bash;
     } catch {
       // There but not runnable: a stale PATH entry, or a bash whose DLLs are
       // not where it expects them.
@@ -436,6 +440,6 @@ function run() {
 
 // The Windows command is assembled from paths that only exist on Windows, so
 // the suite calls the builder directly rather than installing there.
-module.exports = { statusLineCommand, POSIX_COMMAND };
+module.exports = { statusLineCommand, findBash, POSIX_COMMAND };
 
 if (require.main === module) run();

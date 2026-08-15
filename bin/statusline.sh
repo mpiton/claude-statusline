@@ -338,19 +338,29 @@ refresh_usage_cache() {
     local token="" blob creds_file response cache_tmp
     USAGE_RESPONSE=""
 
+    creds_file="$claude_dir/.credentials.json"
+
     if [ -n "$CLAUDE_CODE_OAUTH_TOKEN" ]; then
         token="$CLAUDE_CODE_OAUTH_TOKEN"
-    elif command -v security >/dev/null 2>&1; then
+    fi
+    # The keychain holds one entry for the whole machine, so a session on a
+    # second profile that read it would ask about the account the first profile
+    # logged in with. A credentials file inside the profile that session named
+    # is the more specific answer and goes first. The default profile keeps the
+    # old order: the keychain is where Claude Code writes on macOS, and a
+    # .credentials.json an older release left in ~/.claude should not outrank it.
+    if [ -z "$token" ] && [ -n "${CLAUDE_CONFIG_DIR:-}" ] && [ -f "$creds_file" ]; then
+        token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
+    fi
+    if { [ -z "$token" ] || [ "$token" = "null" ]; } &&
+       command -v security >/dev/null 2>&1; then
         blob=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null)
         if [ -n "$blob" ]; then
             token=$(jq -r '.claudeAiOauth.accessToken // empty' <<< "$blob" 2>/dev/null)
         fi
     fi
-    if [ -z "$token" ] || [ "$token" = "null" ]; then
-        creds_file="$claude_dir/.credentials.json"
-        if [ -f "$creds_file" ]; then
-            token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
-        fi
+    if { [ -z "$token" ] || [ "$token" = "null" ]; } && [ -f "$creds_file" ]; then
+        token=$(jq -r '.claudeAiOauth.accessToken // empty' "$creds_file" 2>/dev/null)
     fi
     if [ -z "$token" ] || [ "$token" = "null" ]; then
         if command -v secret-tool >/dev/null 2>&1; then

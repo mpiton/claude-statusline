@@ -26,7 +26,11 @@ trap 'discard "$TMP"' EXIT
 # OAuth token — env first, then the macOS keychain or the Linux keyring — and
 # calls api.anthropic.com with whatever it finds. Stub the three lookups so
 # `npm test` can't spend a developer's credentials.
-unset CLAUDE_CODE_OAUTH_TOKEN
+#
+# CLAUDE_CONFIG_DIR goes with them: the cases below that expect the default
+# profile would otherwise install into whatever profile the developer running
+# the suite happens to have selected. The profile cases set it themselves.
+unset CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CONFIG_DIR
 mkdir -p "$TMP/bin"
 printf '#!/bin/bash\nexit 7\n' > "$TMP/bin/curl"
 for stub in secret-tool security; do
@@ -330,6 +334,28 @@ selected "$WIN_COMMAND" && {
         ' "$INSTALLER" 2>&1)
         check "$WIN_COMMAND" \
             '"C:\Program Files\Git\bin\bash.exe" "C:/Users/ROG/.claude/statusline.sh"' "$built"
+    fi
+}
+
+# cmd.exe runs the command from wherever Claude Code is, not from where the
+# install ran, so a bash named relatively has to be resolved before it is
+# written down. The lookup itself is the same code on every platform.
+RELATIVE_BASH="a relative CLAUDE_LINE_BASH is stored resolved"
+selected "$RELATIVE_BASH" && {
+    if [ "$PLATFORM" = win32 ]; then
+        # A stand-in has to be a real .exe there, and a copied bash.exe comes
+        # away from its DLLs.
+        skip "$RELATIVE_BASH" "no runnable stand-in on Windows"
+    else
+        BASH_DIR="$TMP/relative-bash"
+        mkdir -p "$BASH_DIR"
+        printf '#!/bin/sh\nexit 0\n' > "$BASH_DIR/mybash"
+        chmod +x "$BASH_DIR/mybash"
+        found=$(cd "$BASH_DIR" && CLAUDE_LINE_BASH=./mybash node -e '
+            const { findBash } = require(process.argv[1]);
+            process.stdout.write(String(findBash()));
+        ' "$INSTALLER" 2>&1)
+        check "$RELATIVE_BASH" "$BASH_DIR/mybash" "$found"
     fi
 }
 

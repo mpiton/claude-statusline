@@ -63,6 +63,7 @@ mkdir -p "$TMP/bin"
 cat > "$TMP/bin/curl" <<'EOF'
 #!/bin/bash
 [ -n "${STUB_CURL_CALLED:-}" ] && : > "$STUB_CURL_CALLED"
+[ -n "${STUB_CURL_ARGS:-}" ] && printf '%s\n' "$@" > "$STUB_CURL_ARGS"
 if [ -n "${STUB_CURL_GATE:-}" ]; then
     [ -n "${STUB_CURL_WAITING:-}" ] && : > "$STUB_CURL_WAITING"
     for ((i=0; i<STATUSLINE_TEST_POLL_ATTEMPTS; i++)); do
@@ -80,9 +81,14 @@ if [ -n "${STUB_CURL_BODY:-}" ] && [ -f "$STUB_CURL_BODY" ]; then
 fi
 exit 7
 EOF
-for stub in secret-tool security; do
-    printf '#!/bin/bash\nexit 1\n' > "$TMP/bin/$stub"
-done
+printf '#!/bin/bash\nexit 1\n' > "$TMP/bin/secret-tool"
+# The macOS keychain lookup, for the cases that care which store a token came
+# from. Silent unless a case puts a blob in the environment.
+cat > "$TMP/bin/security" <<'EOF'
+#!/bin/bash
+[ -n "${STUB_KEYCHAIN_BLOB:-}" ] || exit 1
+printf '%s' "$STUB_KEYCHAIN_BLOB"
+EOF
 chmod +x "$TMP/bin"/*
 export PATH="$TMP/bin:$PATH"
 
@@ -544,6 +550,40 @@ assert "the profile credentials reach the API fallback" \
     "Opus 5 │ ✍️ 25% │ repo-clean (main) │ ● xhigh
 
 $RATES"
+clear_cache
+
+# The keychain holds one entry for the machine, so on a second profile it
+# answers for whichever account logged in last. The file inside the profile the
+# session named is the one that describes that session.
+assert_token() {
+    selected "$1" || return 0
+    if grep -q "Bearer $2" "$TMP/curl-args" 2>/dev/null; then
+        report_pass "$1"
+    else
+        report_fail "$1" "Bearer $2" "$(grep -c . "$TMP/curl-args" 2>/dev/null) curl args"
+    fi
+}
+
+render "$(payload 'del(.rate_limits)')" CLAUDE_CONFIG_DIR="$PROFILE_DIR" \
+    STUB_CURL_BODY="$TMP/profile-response.json" STUB_CURL_ARGS="$TMP/curl-args" \
+    STUB_KEYCHAIN_BLOB='{"claudeAiOauth":{"accessToken":"keychain-token"}}'
+assert_token "the profile token beats the machine-wide keychain" profile-token
+clear_cache
+
+# Without a profile named, the keychain keeps the precedence it always had: it
+# is where Claude Code writes on macOS, and the file may be an older release's
+# leftover.
+printf '{"claudeAiOauth":{"accessToken":"home-token"}}' > "$HOME/.claude/.credentials.json"
+render "$(payload 'del(.rate_limits)')" STUB_CURL_BODY="$TMP/profile-response.json" \
+    STUB_CURL_ARGS="$TMP/curl-args" \
+    STUB_KEYCHAIN_BLOB='{"claudeAiOauth":{"accessToken":"keychain-token"}}'
+assert_token "the default profile still reads the keychain first" keychain-token
+clear_cache
+
+render "$(payload 'del(.rate_limits)')" STUB_CURL_BODY="$TMP/profile-response.json" \
+    STUB_CURL_ARGS="$TMP/curl-args"
+assert_token "an empty keychain falls back to the credentials file" home-token
+rm -f "$HOME/.claude/.credentials.json"
 clear_cache
 
 section "rate limits from stdin"
